@@ -236,7 +236,11 @@ function delayClick(time) {
       const cookie = cookiesEnv[index] ? cookiesEnv[index].trim() : null;
       const delay = (index % maxConcurrentAccounts) * delayBetweenInstances; // 使得每一组内的浏览器可以分开启动
       return () => {
-        // 确保这里返回的是函数
+        // 确保这里返回的是函数,因为settimeout本身是异步的所以必须在外面给他一个promise await才能让它同步的等待这个时间才能执行
+        // 可以改为 return async () => {
+        // await new Promise((resolve) => setTimeout(resolve, delay));
+        // return await launchBrowserForUser(username, password, cookie);
+        // };  更好理解
         return new Promise((resolve, reject) => {
           setTimeout(() => {
             launchBrowserForUser(username, password, cookie)
@@ -707,6 +711,7 @@ async function navigatePage(url, page, browser) {
       console.log("Timeout exceeded, aborting actions.");
       sendToTelegram(`超时了,无法通过Cloudflare验证`);
       await browser.close();
+      // todo: 这里其实不能关的m因为我们是在最后统一关的你不能在这里关m如果你在这关,后面就会触发attempted to sue detached frame
       return; // 超时则退出函数
     }
   }
