@@ -1,0 +1,49 @@
+name: Daily Auto Read (3 accounts)
+
+on:
+  schedule:
+    # 每天 UTC 10:00 运行 (北京时间 18:00)
+    - cron: "0 10 * * *"
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  auto-read:
+    runs-on: windows-latest
+    timeout-minutes: 35
+
+    strategy:
+      matrix:
+        node-version: [20.x]
+
+    env:
+      USERNAMES: ${{ secrets.USERNAMES }}
+      COOKIES: ${{ secrets.COOKIES }}
+      WEBSITE: "https://linux.do"
+      RUN_TIME_LIMIT_MINUTES: "25"
+      MAX_CONCURRENT_ACCOUNTS: "3"
+      AUTO_LIKE: "true"
+      HIDE_ACCOUNT_INFO: "true"
+      SPECIFIC_USER: "14790897"
+      HEALTH_PORT: "7860"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Cache node modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run auto read
+        run: node bypasscf.js
