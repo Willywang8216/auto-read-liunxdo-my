@@ -12,7 +12,7 @@ jobs:
   # Job 1: Refresh cookies (runs first if triggered by schedule)
   refresh-cookies:
     if: github.event.schedule == '0 0 */12 * *' || github.event_name == 'workflow_dispatch'
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
       cookies: ${{ steps.refresh.outputs.cookies }}
@@ -102,7 +102,7 @@ jobs:
   # Job 2: Daily auto-read (runs every day)
   auto-read:
     if: github.event.schedule == '0 10 * * *' || github.event_name == 'workflow_dispatch'
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 35
 
     strategy:

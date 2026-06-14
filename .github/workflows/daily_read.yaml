@@ -8,7 +8,7 @@ on:
 
 jobs:
   auto-read:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 35
 
     strategy:
