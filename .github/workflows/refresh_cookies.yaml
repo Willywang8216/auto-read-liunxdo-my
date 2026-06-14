@@ -8,7 +8,7 @@ on:
 
 jobs:
   refresh:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 10
 
     steps:
@@ -22,13 +22,10 @@ jobs:
       - name: Install curl_cffi
         run: pip install curl_cffi
 
-      - name: Refresh cookies
-        id: refresh
-        env:
-          ACCOUNTS_JSON: ${{ secrets.ACCOUNTS_JSON }}
+      - name: Write refresh script
         run: |
-          python -c "
-          import json, os, time
+          cat > /tmp/refresh_cookies.py << 'PYEOF'
+          import json, os, time, sys
           from curl_cffi import requests
 
           accounts = json.loads(os.environ['ACCOUNTS_JSON'])
@@ -37,68 +34,92 @@ jobs:
           for acc in accounts:
               username = acc['username']
               password = acc['password']
-              print(f'Processing {username}...')
+              print(f'Processing {username}...', flush=True)
 
-              session = requests.Session(impersonate='chrome110')
+              success = False
+              for attempt in range(3):
+                  try:
+                      session = requests.Session(impersonate='chrome124')
 
-              # Get main page
-              r = session.get('https://linux.do/')
-              print(f'  Main page: {r.status_code}')
+                      # Get main page first
+                      r = session.get('https://linux.do/')
+                      print(f'  Main page: {r.status_code}', flush=True)
+                      time.sleep(2)
 
-              # Get CSRF
-              r = session.get('https://linux.do/session/csrf.json', headers={
-                  'Accept': 'application/json',
-                  'X-Requested-With': 'XMLHttpRequest',
-              })
-              print(f'  CSRF: {r.status_code}')
-
-              if r.status_code == 200:
-                  csrf = json.loads(r.text).get('csrf', '')
-                  # Login
-                  r = session.post('https://linux.do/session',
-                      data={'login': username, 'password': password},
-                      headers={
-                          'X-CSRF-Token': csrf,
-                          'X-Requested-With': 'XMLHttpRequest',
+                      # Get CSRF
+                      r = session.get('https://linux.do/session/csrf.json', headers={
                           'Accept': 'application/json',
-                      }
-                  )
-                  print(f'  Login: {r.status_code}')
+                          'X-Requested-With': 'XMLHttpRequest',
+                      })
+                      print(f'  CSRF: {r.status_code}', flush=True)
 
-                  t_cookie = session.cookies.get('_t', '')
-                  if t_cookie:
-                      cookies.append(t_cookie)
-                      print(f'  ✓ Got cookie')
-                  else:
-                      cookies.append('')
-                      print(f'  ✗ No cookie')
-              else:
+                      if r.status_code == 429:
+                          print(f'  Rate limited, waiting 10s...', flush=True)
+                          time.sleep(10)
+                          continue
+
+                      if r.status_code == 200:
+                          csrf = json.loads(r.text).get('csrf', '')
+                          time.sleep(1)
+
+                          # Login
+                          r = session.post('https://linux.do/session',
+                              data={'login': username, 'password': password},
+                              headers={
+                                  'X-CSRF-Token': csrf,
+                                  'X-Requested-With': 'XMLHttpRequest',
+                                  'Accept': 'application/json',
+                              }
+                          )
+                          print(f'  Login: {r.status_code}', flush=True)
+
+                          t_cookie = session.cookies.get('_t', '')
+                          if t_cookie:
+                              cookies.append(t_cookie)
+                              print(f'  [OK] Got cookie', flush=True)
+                              success = True
+                              break
+                          else:
+                              print(f'  [FAIL] No _t cookie in response', flush=True)
+                      else:
+                          print(f'  [FAIL] CSRF blocked', flush=True)
+
+                      time.sleep(5)
+                  except Exception as e:
+                      print(f'  [ERROR] {e}', flush=True)
+                      time.sleep(5)
+
+              if not success:
                   cookies.append('')
-                  print(f'  ✗ CSRF blocked')
+                  print(f'  [FAIL] All attempts failed', flush=True)
 
               time.sleep(3)
 
           result = ','.join(cookies)
-          print(f'\\nCOOKIES={result}')
+          print(f'', flush=True)
+          print(f'COOKIES={result}', flush=True)
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-              f.write(f'cookies={result}\\n')
-          "
+              f.write(f'cookies={result}\n')
+          PYEOF
+
+      - name: Refresh cookies
+        id: refresh
+        env:
+          ACCOUNTS_JSON: ${{ secrets.ACCOUNTS_JSON }}
+        run: python /tmp/refresh_cookies.py
 
       - name: Show results
-        run: echo "Cookies refreshed. Check the workflow logs for the new COOKIES value."
-
-      - name: Instructions
-        if: steps.refresh.outputs.cookies != ''
+        if: always()
         run: |
           echo "=========================================="
-          echo "NEW COOKIES VALUE (copy this):"
+          echo "NEW COOKIES VALUE:"
           echo "${{ steps.refresh.outputs.cookies }}"
           echo "=========================================="
-          echo ""
-          echo "To update the secret:"
-          echo "1. Go to repo Settings > Secrets > Actions"
-          echo "2. Edit the COOKIES secret"
-          echo "3. Paste the value above"
-          echo ""
-          echo "Or use GitHub CLI:"
-          echo "gh secret set COOKIES --body '${{ steps.refresh.outputs.cookies }}'"
+
+      - name: Auto-update COOKIES secret
+        if: steps.refresh.outputs.cookies != '' && !contains(steps.refresh.outputs.cookies, ',,')
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          gh secret set COOKIES --body "${{ steps.refresh.outputs.cookies }}" --repo ${{ github.repository }}
+          echo "COOKIES secret updated automatically!"
