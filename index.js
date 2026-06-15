@@ -170,9 +170,41 @@
     }
   }
 
+  // 修复浏览量：发送 track_visit 请求确保 Discourse 记录访问
+  function trackView() {
+    const match = location.pathname.match(/\/t\/[^/]+\/(\d+)/);
+    if (!match) return;
+    const topicId = match[1];
+    const csrfMeta = document.querySelector('meta[name="csrf-token"]');
+    if (!csrfMeta) return;
+    const csrfToken = csrfMeta.getAttribute("content");
+    setTimeout(() => {
+      fetch(`/t/${topicId}/1.json?track_visit=true&forceLoad=true`, {
+        method: "GET",
+        headers: {
+          Accept: "application/json, text/javascript, */*; q=0.01",
+          "X-Requested-With": "XMLHttpRequest",
+          "Discourse-Track-View": "true",
+          "Discourse-Track-View-Topic-Id": topicId,
+          "Discourse-Present": "true",
+          "Discourse-Logged-In": "true",
+          "X-CSRF-Token": csrfToken,
+        },
+        credentials: "same-origin",
+      })
+        .then((resp) => {
+          if (resp.headers.get("x-discourse-trackview") === "1") {
+            console.log(`[track_visit] 话题 ${topicId} 浏览已计数`);
+          }
+        })
+        .catch(() => {});
+    }, 2000);
+  }
+
   // 入口函数
   window.addEventListener("load", () => {
     checkFirstRun();
+    trackView(); // 修复浏览量计数
     console.log(
       "autoRead",
       localStorage.getItem("read"),
