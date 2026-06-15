@@ -459,6 +459,10 @@ async function launchBrowserForUser(username, password, cookie = null) {
         });
       }
       console.log(`已设置 ${cookieObjects.length} 个Cookie (CDP)，正在刷新页面...`);
+      // 验证 cookie 是否真的设置成功
+      const { cookies: verifyCookies } = await client.send('Network.getAllCookies');
+      const tCookieVerify = verifyCookies.find(c => c.name === '_t' && c.domain.includes(domain));
+      console.log(`CDP cookie 验证: _t=${tCookieVerify ? '存在 (' + tCookieVerify.value.substring(0,20) + '...)' : '缺失！'}`);
       // 带 cookie 导航到话题页
       await navigatePage(loginUrl, page, browser);
       await delayClick(3000);
@@ -525,7 +529,7 @@ async function launchBrowserForUser(username, password, cookie = null) {
         const [specificUser, scriptToEval, isAutoLike] = args;
         localStorage.setItem("read", true);
         localStorage.setItem("specificUser", specificUser);
-        localStorage.setItem("isFirstRun", "false");
+        // 不要设 isFirstRun=false，让脚本自己判断是否需要获取话题列表
         localStorage.setItem("autoLikeEnabled", isAutoLike);
         console.log("当前点赞用户：", specificUser);
         eval(scriptToEval);
