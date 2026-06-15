@@ -308,7 +308,7 @@ function updateCookieInEnv(username, newCookieValue) {
     const cookiesStr = cookiesMatch[1].replace(/^["']|["']$/g, ""); // 去掉引号
     const cookies = cookiesStr.split(",");
     // 更新对应位置的 cookie
-    cookies[userIndex] = newCookieValue;
+    cookies[userIndex] = '_t=' + newCookieValue;
     const newCookiesStr = `COOKIES=${cookies.join(",")}`;
     envContent = envContent.replace(/^COOKIES=.*$/m, newCookiesStr);
     fs.writeFileSync(envPath, envContent, "utf8");
