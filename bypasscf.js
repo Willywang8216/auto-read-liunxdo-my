@@ -293,6 +293,30 @@ function delayClick(time) {
     }
   }
 })();
+// 根据用户名更新 .env 中对应的 cookie
+function updateCookieInEnv(username, newCookieValue) {
+  try {
+    const envPath = path.join(dirname(fileURLToPath(import.meta.url)), ".env");
+    if (!fs.existsSync(envPath)) return;
+    let envContent = fs.readFileSync(envPath, "utf8");
+    const usernames = process.env.USERNAMES.split(",");
+    const userIndex = usernames.indexOf(username);
+    if (userIndex < 0) return;
+    // 解析当前 COOKIES 值
+    const cookiesMatch = envContent.match(/^COOKIES=(.*)$/m);
+    if (!cookiesMatch) return;
+    const cookiesStr = cookiesMatch[1].replace(/^["']|["']$/g, ""); // 去掉引号
+    const cookies = cookiesStr.split(",");
+    // 更新对应位置的 cookie
+    cookies[userIndex] = newCookieValue;
+    const newCookiesStr = `COOKIES=${cookies.join(",")}`;
+    envContent = envContent.replace(/^COOKIES=.*$/m, newCookiesStr);
+    fs.writeFileSync(envPath, envContent, "utf8");
+    console.log(`.env cookie updated for ${username} (index ${userIndex})`);
+  } catch (e) {
+    console.warn("updateCookieInEnv failed:", e.message);
+  }
+}
 // 将浏览器Cookie字符串（如 "name=value; name2=value2"）解析为 puppeteer setCookie 所需的对象数组
 function parseCookieString(cookieStr, domain) {
   return cookieStr
@@ -595,6 +619,48 @@ async function launchBrowserForUser(username, password, cookie = null) {
         await new Promise((r) => setTimeout(r, 500));
       });
     }
+
+    // 验证阅读脚本是否真正在运行
+    await delayClick(5000); // 等 5 秒让脚本初始化
+    try {
+      const readingStatus = await page.evaluate(() => {
+        return {
+          read: localStorage.getItem("read"),
+          topicList: JSON.parse(localStorage.getItem("topicList") || "[]").length,
+          currentUrl: window.location.href,
+        };
+      });
+      console.log(`阅读状态检查: read=${readingStatus.read}, 待阅读=${readingStatus.topicList}篇`);
+      if (readingStatus.read !== "true" || readingStatus.topicList === 0) {
+        console.warn("阅读脚本可能未正常运行，尝试重新注入...");
+        await page.evaluate(
+          (specificUser, scriptToEval, isAutoLike) => {
+            localStorage.setItem("read", true);
+            localStorage.setItem("isFirstRun", "false");
+            localStorage.setItem("autoLikeEnabled", isAutoLike);
+            try { eval(scriptToEval); } catch (e) { console.error("re-inject failed", e); }
+          },
+          specificUser,
+          externalScript,
+          isAutoLike
+        );
+      }
+    } catch (e) {
+      console.warn("阅读状态检查失败:", e.message);
+    }
+
+    // 登录成功后自动更新 cookie 到 .env，下次就不用再输密码
+    try {
+      const cookies = await page.cookies(loginUrl);
+      const tCookie = cookies.find((c) => c.name === "_t");
+      if (tCookie) {
+        updateCookieInEnv(username, tCookie.value);
+        console.log(`Cookie 已自动更新: ${username}`);
+      }
+    } catch (e) {
+      console.warn("Cookie 自动更新失败:", e.message);
+    }
+
     return { browser };
   } catch (err) {
     // throw new Error(err);
@@ -720,7 +786,7 @@ async function navigatePage(url, page, browser) {
   await page.goto(url, { waitUntil: "domcontentloaded" }); //如果使用默认的load,linux下页面会一直加载导致无法继续执行
 
   const startTime = Date.now(); // 记录开始时间
-  let pageTitle = await page.title(); // 获取当前页面标题
+  let pageTitle = await safeTitle(page); // 获取当前页面标题
   let cfNotified = false;
 
   while (pageTitle.includes("Just a moment") || pageTitle.includes("请稍候")) {
@@ -737,8 +803,8 @@ async function navigatePage(url, page, browser) {
 
     await delayClick(2000); // 每次检查间隔2秒
 
-    // 重新获取页面标题
-    pageTitle = await page.title();
+    // 重新获取页面标题（可能因 CF redirect 导致 context 销毁）
+    pageTitle = await safeTitle(page);
 
     // 有人工验证时等 120 秒，否则 35 秒
     const timeout = cfNotified ? 120000 : 35000;
@@ -752,6 +818,15 @@ async function navigatePage(url, page, browser) {
     }
   }
   console.log("页面标题：", pageTitle);
+}
+
+// 安全获取页面标题，防止 execution context destroyed 崩溃
+async function safeTitle(page) {
+  try {
+    return await page.title();
+  } catch {
+    return ""; // context 销毁时返回空，让 while 条件为 false 退出循环
+  }
 }
 
 // 每秒截图功能
