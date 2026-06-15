@@ -445,10 +445,21 @@ async function launchBrowserForUser(username, password, cookie = null) {
       cookieLoginAttempted = true;
       const domain = new URL(loginUrl).hostname;
       const cookieObjects = parseCookieString(cookie, domain);
-      await page.setCookie(...cookieObjects);
-      console.log(`已设置 ${cookieObjects.length} 个Cookie，正在刷新页面...`);
-      await page.reload({ waitUntil: "domcontentloaded" });
-      // Wait for Cloudflare challenge to pass after reload
+      // 先导航到域名建立 context，再用 CDP 设置 cookie（puppeteer API 的 setCookie 在导航时会丢失）
+      await page.goto(loginUrl, { waitUntil: "domcontentloaded", timeout: parseInt(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT || "120000", 10) }).catch(() => {});
+      const client = await page.createCDPSession();
+      for (const c of cookieObjects) {
+        await client.send('Network.setCookie', {
+          name: c.name,
+          value: c.value,
+          domain: '.' + domain,
+          path: '/',
+          secure: true,
+          httpOnly: true,
+        });
+      }
+      console.log(`已设置 ${cookieObjects.length} 个Cookie (CDP)，正在刷新页面...`);
+      // 带 cookie 导航到话题页
       await navigatePage(loginUrl, page, browser);
       await delayClick(3000);
       // Verify login by navigating to a known page
