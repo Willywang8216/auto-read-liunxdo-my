@@ -314,6 +314,9 @@ async function launchBrowserForUser(username, password, cookie = null) {
     const browserOptions = {
       headless: "auto",
       args: ["--no-sandbox", "--disable-setuid-sandbox"], // Linux 需要的安全设置
+      customConfig: {
+        chromePath: "C:\\Users\\willy\\AppData\\Local\\ms-playwright\\chromium-1223\\chrome-win64\\chrome.exe",
+      },
     };
 
     // 添加代理配置到浏览器选项
@@ -408,8 +411,11 @@ async function launchBrowserForUser(username, password, cookie = null) {
       }
     });
     // 登录操作：优先使用Cookie，否则使用表单登录
+    let cookieLoginAttempted = false;
+    let cookieLoginFailed = false;
     if (cookie) {
       console.log("检测到Cookie，跳过表单登录，直接设置Cookie");
+      cookieLoginAttempted = true;
       const domain = new URL(loginUrl).hostname;
       const cookieObjects = parseCookieString(cookie, domain);
       await page.setCookie(...cookieObjects);
@@ -428,8 +434,17 @@ async function launchBrowserForUser(username, password, cookie = null) {
     }
     // 查找具有类名 "avatar" 的 img 元素验证登录是否成功
     // 若存在 span.auth-buttons 则说明处于未登录状态
-    const avatarImg = await page.$("img.avatar");
-    const authButtons = await page.$("span.auth-buttons");
+    let avatarImg = await page.$("img.avatar");
+    let authButtons = await page.$("span.auth-buttons");
+
+    // Cookie 登录失败且有密码时，自动退回密码登录
+    if ((authButtons || !avatarImg) && cookieLoginAttempted && password) {
+      console.log("Cookie 已过期，自动退回密码登录...");
+      cookieLoginFailed = true;
+      await login(page, username, password);
+      avatarImg = await page.$("img.avatar");
+      authButtons = await page.$("span.auth-buttons");
+    }
 
     if (authButtons) {
       console.log("找到 auth-buttons，用户未登录，登录失败");
@@ -703,21 +718,44 @@ async function navigatePage(url, page, browser) {
 
   const startTime = Date.now(); // 记录开始时间
   let pageTitle = await page.title(); // 获取当前页面标题
+  let cfNotified = false;
 
   while (pageTitle.includes("Just a moment") || pageTitle.includes("请稍候")) {
     console.log("The page is under Cloudflare protection. Waiting...");
+
+    // 检测是否需要人工验证（Turnstile/CAPTCHA iframe）
+    if (!cfNotified) {
+      const hasChallenge = await page.evaluate(() => {
+        return !!(
+          document.querySelector('iframe[src*="challenges.cloudflare.com"]') ||
+          document.querySelector('iframe[title*="Cloudflare"]') ||
+          document.querySelector('#challenge-running') ||
+          document.querySelector('.cf-turnstile')
+        );
+      }).catch(() => false);
+
+      if (hasChallenge) {
+        console.log("检测到 Cloudflare 人工验证，发送 Telegram 通知...");
+        const cfMsg = `⚠️ 需要人工通过 Cloudflare 验证！\n请在浏览器中完成验证，脚本会自动等待。`;
+        sendToTelegram(cfMsg);
+        sendToTelegramGroup(cfMsg);
+        cfNotified = true;
+      }
+    }
 
     await delayClick(2000); // 每次检查间隔2秒
 
     // 重新获取页面标题
     pageTitle = await page.title();
 
-    // 检查是否超过15秒
-    if (Date.now() - startTime > 35000) {
+    // 有人工验证时等 120 秒，否则 35 秒
+    const timeout = cfNotified ? 120000 : 35000;
+    if (Date.now() - startTime > timeout) {
       console.log("Timeout exceeded, aborting actions.");
-      sendToTelegram(`超时了,无法通过Cloudflare验证`);
-      await browser.close();
-      // todo: 这里其实不能关的m因为我们是在最后统一关的你不能在这里关m如果你在这关,后面就会触发attempted to sue detached frame
+      const timeoutMsg = `超时了,无法通过Cloudflare验证`;
+      sendToTelegram(timeoutMsg);
+      sendToTelegramGroup(timeoutMsg);
+      // 不在這裡關閉瀏覽器，由調用方統一處理
       return; // 超时则退出函数
     }
   }
