@@ -726,24 +726,13 @@ async function navigatePage(url, page, browser) {
   while (pageTitle.includes("Just a moment") || pageTitle.includes("请稍候")) {
     console.log("The page is under Cloudflare protection. Waiting...");
 
-    // 检测是否需要人工验证（Turnstile/CAPTCHA iframe）
-    if (!cfNotified) {
-      const hasChallenge = await page.evaluate(() => {
-        return !!(
-          document.querySelector('iframe[src*="challenges.cloudflare.com"]') ||
-          document.querySelector('iframe[title*="Cloudflare"]') ||
-          document.querySelector('#challenge-running') ||
-          document.querySelector('.cf-turnstile')
-        );
-      }).catch(() => false);
-
-      if (hasChallenge) {
-        console.log("检测到 Cloudflare 人工验证，发送 Telegram 通知...");
-        const cfMsg = `⚠️ 需要人工通过 Cloudflare 验证！\n请在浏览器中完成验证，脚本会自动等待。`;
-        sendToTelegram(cfMsg);
-        sendToTelegramGroup(cfMsg);
-        cfNotified = true;
-      }
+    // CF 保护超过 5 秒 → 可能需要人工验证，发送 Telegram 通知
+    if (!cfNotified && Date.now() - startTime > 5000) {
+      console.log("CF 保护持续超过 5 秒，发送 Telegram 通知...");
+      const cfMsg = `⚠️ Cloudflare 验证中！请到浏览器手动通过，脚本会等待 120 秒。`;
+      sendToTelegram(cfMsg);
+      sendToTelegramGroup(cfMsg);
+      cfNotified = true;
     }
 
     await delayClick(2000); // 每次检查间隔2秒
