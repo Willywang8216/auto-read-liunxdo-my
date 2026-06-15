@@ -317,6 +317,9 @@ async function launchBrowserForUser(username, password, cookie = null) {
       customConfig: {
         chromePath: "C:\\Users\\willy\\AppData\\Local\\ms-playwright\\chromium-1223\\chrome-win64\\chrome.exe",
       },
+      connectOption: {
+        protocolTimeout: 120000,
+      },
     };
 
     // 添加代理配置到浏览器选项
