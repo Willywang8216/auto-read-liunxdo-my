@@ -415,6 +415,12 @@ async function launchBrowserForUser(username, password, cookie = null) {
       await page.setCookie(...cookieObjects);
       console.log(`已设置 ${cookieObjects.length} 个Cookie，正在刷新页面...`);
       await page.reload({ waitUntil: "domcontentloaded" });
+      // Wait for Cloudflare challenge to pass after reload
+      await navigatePage(loginUrl, page, browser);
+      await delayClick(3000);
+      // Verify login by navigating to a known page
+      await page.goto(loginUrl + "/latest", { waitUntil: "domcontentloaded" });
+      await navigatePage(loginUrl, page, browser);
       await delayClick(2000);
     } else {
       console.log("登录操作");
