@@ -335,12 +335,14 @@ async function launchBrowserForUser(username, password, cookie = null) {
   let browser = null; // 在 try 之外声明 browser 变量
   try {
     console.log("当前用户:", maskUsername(username));
+    const profileDir = path.join(process.env.TEMP || process.env.TMP || "/tmp", "linuxdo-browser-profile");
+    if (!fs.existsSync(profileDir)) fs.mkdirSync(profileDir, { recursive: true });
     const browserOptions = {
       headless: "auto",
       args: ["--no-sandbox", "--disable-setuid-sandbox"], // Linux 需要的安全设置
       customConfig: {
         chromePath: "C:\\Users\\willy\\AppData\\Local\\ms-playwright\\chromium-1223\\chrome-win64\\chrome.exe",
-        userDataDir: path.join(process.env.TEMP || process.env.TMP || "/tmp", "linuxdo-browser-profile"),
+        userDataDir: profileDir,
       },
       connectOption: {
         protocolTimeout: 120000,
