@@ -340,6 +340,7 @@ async function launchBrowserForUser(username, password, cookie = null) {
       args: ["--no-sandbox", "--disable-setuid-sandbox"], // Linux 需要的安全设置
       customConfig: {
         chromePath: "C:\\Users\\willy\\AppData\\Local\\ms-playwright\\chromium-1223\\chrome-win64\\chrome.exe",
+        userDataDir: path.join(process.env.TEMP || process.env.TMP || "/tmp", "linuxdo-browser-profile"),
       },
       connectOption: {
         protocolTimeout: 120000,
@@ -440,13 +441,19 @@ async function launchBrowserForUser(username, password, cookie = null) {
     // 登录操作：优先使用Cookie，否则使用表单登录
     let cookieLoginAttempted = false;
     let cookieLoginFailed = false;
+    let savedCookieValue = null; // 保存 cookie 值以便 CF 后重新设置
     if (cookie) {
       console.log("检测到Cookie，跳过表单登录，直接设置Cookie");
       cookieLoginAttempted = true;
       const domain = new URL(loginUrl).hostname;
       const cookieObjects = parseCookieString(cookie, domain);
-      // 先导航到域名建立 context，再用 CDP 设置 cookie（puppeteer API 的 setCookie 在导航时会丢失）
+      // 保存 _t cookie 值用于 CF 后重新设置
+      const tObj = cookieObjects.find(c => c.name === '_t');
+      if (tObj) savedCookieValue = tObj.value;
+      // 导航到域名，先通过 CF challenge
       await page.goto(loginUrl, { waitUntil: "domcontentloaded", timeout: parseInt(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT || "120000", 10) }).catch(() => {});
+      await waitForCf(page, browser);
+      // CF 通过后，用 CDP 设置 cookie
       const client = await page.createCDPSession();
       for (const c of cookieObjects) {
         await client.send('Network.setCookie', {
@@ -458,17 +465,25 @@ async function launchBrowserForUser(username, password, cookie = null) {
           httpOnly: true,
         });
       }
-      console.log(`已设置 ${cookieObjects.length} 个Cookie (CDP)，正在刷新页面...`);
-      // 验证 cookie 是否真的设置成功
+      console.log(`已设置 ${cookieObjects.length} 个Cookie (CDP)`);
+      // 验证 cookie 设置成功
       const { cookies: verifyCookies } = await client.send('Network.getAllCookies');
       const tCookieVerify = verifyCookies.find(c => c.name === '_t' && c.domain.includes(domain));
-      console.log(`CDP cookie 验证: _t=${tCookieVerify ? '存在 (' + tCookieVerify.value.substring(0,20) + '...)' : '缺失！'}`);
-      // 带 cookie 导航到话题页
-      await navigatePage(loginUrl, page, browser);
-      await delayClick(3000);
-      // Verify login by navigating to a known page
-      await page.goto(loginUrl + "/latest", { waitUntil: "domcontentloaded" });
-      await navigatePage(loginUrl, page, browser);
+      console.log(`CDP cookie 验证: _t=${tCookieVerify ? '存在' : '缺失！'}`);
+      // 带 cookie 刷新页面让 Discourse 读取 session
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await waitForCf(page, browser);
+      // CF 后检查 _t 是否还在，如果丢了就重新设置
+      const { cookies: postCfCookies } = await client.send('Network.getAllCookies');
+      if (!postCfCookies.find(c => c.name === '_t' && c.domain.includes(domain)) && savedCookieValue) {
+        console.log("CF challenge 清除了 _t cookie，重新设置...");
+        await client.send('Network.setCookie', {
+          name: '_t', value: savedCookieValue,
+          domain: '.' + domain, path: '/', secure: true, httpOnly: true,
+        });
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await waitForCf(page, browser);
+      }
       await delayClick(2000);
     } else {
       console.log("登录操作");
@@ -664,16 +679,18 @@ async function launchBrowserForUser(username, password, cookie = null) {
       console.warn("阅读状态检查失败:", e.message);
     }
 
-    // 登录成功后自动更新 cookie 到 .env，下次就不用再输密码
-    try {
-      const cookies = await page.cookies(loginUrl);
-      const tCookie = cookies.find((c) => c.name === "_t");
-      if (tCookie) {
-        updateCookieInEnv(username, tCookie.value);
-        console.log(`Cookie 已自动更新: ${username}`);
+    // 登录成功后自动更新 cookie 到 .env（仅在密码登入成功后，跳过 cookie 登入成功的）
+    if (!cookie || cookieLoginFailed) {
+      try {
+        const cookies = await page.cookies(loginUrl);
+        const tCookie = cookies.find((c) => c.name === "_t");
+        if (tCookie) {
+          updateCookieInEnv(username, tCookie.value);
+          console.log(`Cookie 已自动更新: ${username}`);
+        }
+      } catch (e) {
+        console.warn("Cookie 自动更新失败:", e.message);
       }
-    } catch (e) {
-      console.warn("Cookie 自动更新失败:", e.message);
     }
 
     return { browser };
@@ -687,6 +704,9 @@ async function launchBrowserForUser(username, password, cookie = null) {
   }
 }
 async function login(page, username, password, retryCount = 3) {
+  // 先等待 CF challenge 通过，否则找不到登录表单
+  await waitForCf(page, null);
+  await delayClick(2000);
   // 使用XPath查询找到包含"登录"或"login"文本的按钮
   let loginButtonFound = await page.evaluate(() => {
     let loginButton = Array.from(document.querySelectorAll("button")).find(
@@ -841,6 +861,27 @@ async function safeTitle(page) {
     return await page.title();
   } catch {
     return ""; // context 销毁时返回空，让 while 条件为 false 退出循环
+  }
+}
+
+// 等待 Cloudflare challenge 通过（不导航，只等待当前页面的 CF 完成）
+async function waitForCf(page, browser) {
+  const start = Date.now();
+  let title = await safeTitle(page);
+  let cfNotified = false;
+  while (title.includes("Just a moment") || title.includes("请稍候")) {
+    if (!cfNotified && Date.now() - start > 5000) {
+      const cfMsg = `⚠️ Cloudflare 验证中！请到浏览器手动通过。`;
+      sendToTelegram(cfMsg);
+      sendToTelegramGroup(cfMsg);
+      cfNotified = true;
+    }
+    await delayClick(2000);
+    title = await safeTitle(page);
+    if (Date.now() - start > (cfNotified ? 120000 : 35000)) {
+      console.log("CF wait timeout");
+      return;
+    }
   }
 }
 
