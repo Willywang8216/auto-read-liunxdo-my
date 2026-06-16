@@ -525,7 +525,17 @@ async function launchBrowserForUser(username, password, cookie = null) {
     if ((authButtons || !avatarImg) && cookieLoginAttempted && password) {
       console.log("Cookie 已过期，自动退回密码登录...");
       cookieLoginFailed = true;
-      // 不额外导航，直接在当前已通过 CF 的页面上登入
+      await login(page, username, password);
+      avatarImg = await page.$("img.avatar");
+      authButtons = await page.$("span.auth-buttons");
+    }
+
+    // 如果登录还是失败，再试一次导航到 /login
+    if ((authButtons || !avatarImg) && password) {
+      console.log("登录未成功，导航到 /login 页面重试...");
+      await page.goto(loginUrl + "/login", { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+      await waitForCf(page, browser);
+      await delayClick(2000);
       await login(page, username, password);
       avatarImg = await page.$("img.avatar");
       authButtons = await page.$("span.auth-buttons");
@@ -736,62 +746,40 @@ async function login(page, username, password, retryCount = 3) {
   await waitForCf(page, null);
   await delayClick(1000);
 
-  // 关闭弹窗
-  await page.evaluate(() => {
-    document.querySelectorAll('.dialog-footer .btn-primary, .dialog-footer .btn').forEach(b => b.click());
-  }).catch(() => {});
-  await delayClick(1000);
-
-  // 方法 1: 使用 Discourse API 直接登录（绕过 UI）
-  console.log("尝试 API 登录...");
-  const apiResult = await page.evaluate(async (user, pass) => {
-    try {
-      // 获取 CSRF token
-      const csrfResp = await fetch('/session/csrf.json', { credentials: 'same-origin' });
-      const csrfData = await csrfResp.json();
-      const csrfToken = csrfData.csrf;
-
-      // POST 登录请求
-      const resp = await fetch('/session', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'X-CSRF-Token': csrfToken,
-          'X-Requested-With': 'XMLHttpRequest',
-        },
-        credentials: 'same-origin',
-        body: `login=${encodeURIComponent(user)}&password=${encodeURIComponent(pass)}`,
-      });
-      const data = await resp.json();
-      return { status: resp.status, ok: resp.ok, error: data.error, message: data.message };
-    } catch (e) {
-      return { error: e.message };
-    }
-  }, username, password);
-
-  console.log("API 登录结果:", JSON.stringify(apiResult));
-
-  if (apiResult.ok) {
-    // API 登录成功，刷新页面
-    await page.reload({ waitUntil: 'domcontentloaded' });
+  // 直接导航到 /login 页面（已验证 selectors 都正常）
+  const currentUrl = page.url();
+  if (!currentUrl.includes('/login')) {
+    console.log("导航到 /login 页面...");
+    await page.goto(loginUrl + "/login", { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
     await waitForCf(page, null);
-    await delayClick(2000);
-    return;
+    await delayClick(3000);
   }
 
-  // 方法 2: API 失败时回退到 UI 登录
-  console.log("API 登录失败，尝试 UI 登录...");
-  // 点击 header 登录按钮
-  await page.evaluate(() => {
-    const btn = document.querySelector('.header-buttons .login-button, .login-button.btn, .btn-primary.login-button');
-    if (btn) btn.click();
-  }).catch(() => {});
-  await delayClick(3000);
-
   // 等待用户名输入框
-  const hasForm = await page.waitForSelector('#login-account-name', { timeout: 10000 }).catch(() => null);
-  if (!hasForm) {
-    console.log("登录模态框未打开");
+  const nameInput = await page.waitForSelector('#login-account-name', { timeout: 15000 }).catch(() => null);
+  if (!nameInput) {
+    console.log("登录页面未加载，尝试 API 登录...");
+    const apiResult = await page.evaluate(async (user, pass) => {
+      try {
+        const csrfResp = await fetch('/session/csrf.json', { credentials: 'same-origin' });
+        const csrfData = await csrfResp.json();
+        const resp = await fetch('/session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRF-Token': csrfData.csrf, 'X-Requested-With': 'XMLHttpRequest' },
+          credentials: 'same-origin',
+          body: `login=${encodeURIComponent(user)}&password=${encodeURIComponent(pass)}`,
+        });
+        const data = await resp.json();
+        return { status: resp.status, ok: resp.ok, error: data.error };
+      } catch (e) { return { error: e.message }; }
+    }, username, password);
+    console.log("API 登录结果:", JSON.stringify(apiResult));
+    if (apiResult.ok) {
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await waitForCf(page, null);
+      return;
+    }
+    if (retryCount > 0) return await login(page, username, password, retryCount - 1);
     return;
   }
 
@@ -800,27 +788,29 @@ async function login(page, username, password, retryCount = 3) {
   await page.type('#login-account-name', username, { delay: 100 });
   await delayClick(1000);
 
-  // 点击 "使用密碼登入"
+  // 点击 "使用密碼登入"（/login 页面默认显示社交登录）
   await page.evaluate(() => {
     const btn = Array.from(document.querySelectorAll('button, a, .btn')).find(el =>
       el.textContent.includes('使用密碼') || el.textContent.includes('use password')
     );
     if (btn) btn.click();
   }).catch(() => {});
-  await delayClick(3000);
+  await delayClick(2000);
 
   // 等待密码输入框
-  const pwInput = await page.waitForSelector('#login-account-password', { timeout: 15000 }).catch(() => null);
+  const pwInput = await page.waitForSelector('#login-account-password', { timeout: 10000 }).catch(() => null);
   if (!pwInput) {
-    console.log("密码输入框未出现，UI 登录也失败");
+    console.log("密码输入框未出现");
+    if (retryCount > 0) return await login(page, username, password, retryCount - 1);
     return;
   }
 
+  // 输入密码
   await page.click('#login-account-password', { clickCount: 3 });
   await page.type('#login-account-password', password, { delay: 100 });
   await delayClick(1000);
 
-  // 点击登录按钮
+  // 点击登录
   await page.click('#login-button');
   await delayClick(1000);
   try {
