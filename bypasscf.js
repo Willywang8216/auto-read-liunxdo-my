@@ -294,7 +294,8 @@ function delayClick(time) {
   }
 })();
 // 根据用户名更新 .env 中对应的 cookie
-function updateCookieInEnv(username, newCookieValue) {
+// 登录成功后保存 _t 和 _forum_session cookie
+function updateCookieInEnv(username, cookieList) {
   try {
     const envPath = path.join(dirname(fileURLToPath(import.meta.url)), ".env");
     if (!fs.existsSync(envPath)) return;
@@ -302,17 +303,16 @@ function updateCookieInEnv(username, newCookieValue) {
     const usernames = process.env.USERNAMES.split(",");
     const userIndex = usernames.indexOf(username);
     if (userIndex < 0) return;
-    // 解析当前 COOKIES 值
     const cookiesMatch = envContent.match(/^COOKIES=(.*)$/m);
     if (!cookiesMatch) return;
-    const cookiesStr = cookiesMatch[1].replace(/^["']|["']$/g, ""); // 去掉引号
+    const cookiesStr = cookiesMatch[1].replace(/^["']|["']$/g, "");
     const cookies = cookiesStr.split(",");
-    // 更新对应位置的 cookie
-    cookies[userIndex] = '_t=' + newCookieValue;
+    // 保存 _t 和 _forum_session，用分号分隔
+    cookies[userIndex] = cookieList.join(";");
     const newCookiesStr = `COOKIES=${cookies.join(",")}`;
     envContent = envContent.replace(/^COOKIES=.*$/m, newCookiesStr);
     fs.writeFileSync(envPath, envContent, "utf8");
-    console.log(`.env cookie updated for ${username} (index ${userIndex})`);
+    console.log(`.env cookie updated for ${username} (${cookieList.length} cookies)`);
   } catch (e) {
     console.warn("updateCookieInEnv failed:", e.message);
   }
@@ -681,18 +681,20 @@ async function launchBrowserForUser(username, password, cookie = null) {
       console.warn("阅读状态检查失败:", e.message);
     }
 
-    // 登录成功后自动更新 cookie 到 .env（仅在密码登入成功后，跳过 cookie 登入成功的）
-    if (!cookie || cookieLoginFailed) {
-      try {
-        const cookies = await page.cookies(loginUrl);
-        const tCookie = cookies.find((c) => c.name === "_t");
-        if (tCookie) {
-          updateCookieInEnv(username, tCookie.value);
-          console.log(`Cookie 已自动更新: ${username}`);
-        }
-      } catch (e) {
-        console.warn("Cookie 自动更新失败:", e.message);
+    // 登录成功后自动更新 cookie 到 .env（保存 _t + _forum_session 供下次使用）
+    try {
+      const browserCookies = await page.cookies(loginUrl);
+      const cookieNames = ["_t", "_forum_session"];
+      const cookieList = cookieNames
+        .map(name => browserCookies.find(c => c.name === name))
+        .filter(Boolean)
+        .map(c => `${c.name}=${c.value}`);
+      if (cookieList.length > 0) {
+        updateCookieInEnv(username, cookieList);
+        console.log(`Cookie 已自动更新: ${username} (${cookieList.length} cookies)`);
       }
+    } catch (e) {
+      console.warn("Cookie 自动更新失败:", e.message);
     }
 
     return { browser };
