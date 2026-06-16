@@ -335,7 +335,7 @@ async function launchBrowserForUser(username, password, cookie = null) {
   let browser = null; // 在 try 之外声明 browser 变量
   try {
     console.log("当前用户:", maskUsername(username));
-    const profileDir = path.join(process.env.TEMP || process.env.TMP || "/tmp", "linuxdo-browser-profile");
+    const profileDir = path.join(process.env.TEMP || process.env.TMP || "/tmp", "linuxdo-browser-profile", username);
     if (!fs.existsSync(profileDir)) fs.mkdirSync(profileDir, { recursive: true });
     const browserOptions = {
       headless: "auto",
