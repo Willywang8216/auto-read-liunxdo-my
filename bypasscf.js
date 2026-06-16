@@ -729,18 +729,16 @@ async function login(page, username, password, retryCount = 3) {
   let hasLoginForm = await page.$('#login-account-name');
   if (!hasLoginForm) {
     console.log("查找登录按钮...");
-    // 尝试点击页面上的 "登入" 按钮
+    // 点击 header 的登录按钮（.login-button）
     const clicked = await page.evaluate(() => {
-      const btn = Array.from(document.querySelectorAll('button, a')).find(el =>
-        el.textContent.includes('登入') || el.textContent.includes('login') || el.textContent.includes('登录')
-      );
-      if (btn) { btn.click(); return true; }
-      return false;
+      const btn = document.querySelector('.header-buttons .login-button, .login-button.btn, .btn-primary.login-button');
+      if (btn) { btn.click(); return btn.textContent.trim(); }
+      // 备用：找文字为 "登入" 的按钮
+      const btn2 = Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === '登入');
+      if (btn2) { btn2.click(); return btn2.textContent.trim(); }
+      return null;
     });
-    if (!clicked) {
-      console.log("找不到登录按钮，尝试点击 header 登录链接...");
-      await page.click('.header-buttons .login-button, .login-button').catch(() => {});
-    }
+    console.log("点击结果:", clicked || '未找到');
     await delayClick(3000);
   }
 
