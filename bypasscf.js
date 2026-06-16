@@ -779,10 +779,8 @@ async function login(page, username, password, retryCount = 3) {
     // 首页：用 Ember.js 内部方法打开登录模态框
     console.log("尝试通过 Ember 打开登录模态框...");
     const modalOpened = await page.evaluate(() => {
-      // 方法 1: 点击 header 登录按钮
       const btn = document.querySelector('.header-buttons .login-button, .login-button.btn');
       if (btn) { btn.click(); return 'button'; }
-      // 方法 2: Ember application route
       try {
         const app = window.Discourse || window.App;
         if (app && app.__container__) {
@@ -790,7 +788,6 @@ async function login(page, username, password, retryCount = 3) {
           if (router) { router.transitionTo('login'); return 'ember-route'; }
         }
       } catch {}
-      // 方法 3: jQuery trigger
       try {
         if (window.$ || window.jQuery) {
           (window.$ || window.jQuery)('.login-button').first().click();
@@ -801,6 +798,22 @@ async function login(page, username, password, retryCount = 3) {
     });
     console.log("模态框触发方式:", modalOpened);
     await delayClick(3000);
+
+    // 检查模态框内容
+    const modalDebug = await page.evaluate(() => {
+      const nameInput = document.querySelector('#login-account-name');
+      const pwInput = document.querySelector('#login-account-password');
+      const pwLink = Array.from(document.querySelectorAll('button, a, .btn')).find(el =>
+        el.textContent.includes('使用密碼') || el.textContent.includes('use password')
+      );
+      const allButtons = Array.from(document.querySelectorAll('.modal-body button, .modal-body a, .login-modal button, .login-modal a')).map(el => el.textContent.trim().substring(0, 30));
+      return {
+        hasName: !!nameInput, hasPw: !!pwInput, hasPwLink: !!pwLink,
+        pwLinkText: pwLink ? pwLink.textContent.trim() : null,
+        buttons: allButtons.slice(0, 10),
+      };
+    }).catch(() => ({}));
+    console.log("模态框内容:", JSON.stringify(modalDebug));
 
     // 检查模态框是否打开
     const hasModal = await page.$('#login-account-name');
