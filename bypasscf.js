@@ -804,9 +804,6 @@ async function login(page, username, password, retryCount = 3) {
     }
   }
 }
-  }
-  await delayClick(1000);
-}
 
 async function navigatePage(url, page, browser) {
   try {
