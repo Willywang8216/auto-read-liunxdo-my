@@ -776,21 +776,29 @@ async function login(page, username, password, retryCount = 3) {
   console.log("使用登录表单:", useAlt ? 'signin (首页)' : 'login (模态框)');
 
   if (useAlt) {
-    // 首页 signin 表单：用 evaluate 直接设置值（元素可能不可见）
-    console.log("使用 evaluate 直接填写 signin 表单...");
-    await page.evaluate((user, pass) => {
-      const nameInput = document.querySelector('#signin_username');
-      const pwInput = document.querySelector('#signin_password');
-      if (nameInput) { nameInput.value = user; nameInput.dispatchEvent(new Event('input', { bubbles: true })); }
-      if (pwInput) { pwInput.value = pass; pwInput.dispatchEvent(new Event('input', { bubbles: true })); }
-    }, username, password);
-    await delayClick(1000);
-    // 提交表单
+    // 首页 signin 表单：先让元素可见，再用 type 填写
+    console.log("填写首页 signin 表单...");
+    // 让隐藏的表单元素可见
     await page.evaluate(() => {
-      const btn = document.querySelector('#signin-button');
-      if (btn) btn.click();
-    });
-    await delayClick(1000);
+      ['#signin_username', '#signin_password', '#signin-button'].forEach(sel => {
+        const el = document.querySelector(sel);
+        if (el) { el.style.display = 'block'; el.style.visibility = 'visible'; el.style.opacity = '1'; }
+      });
+      // 也显示父容器
+      const form = document.querySelector('#signin-form, .login-form, form');
+      if (form) { form.style.display = 'block'; form.style.visibility = 'visible'; }
+    }).catch(() => {});
+    await delayClick(500);
+    // 填写用户名
+    await page.click('#signin_username', { clickCount: 3 }).catch(() => {});
+    await page.type('#signin_username', username, { delay: 50 });
+    await delayClick(500);
+    // 填写密码
+    await page.click('#signin_password', { clickCount: 3 }).catch(() => {});
+    await page.type('#signin_password', password, { delay: 50 });
+    await delayClick(500);
+    // 点击登录
+    await page.click('#signin-button').catch(() => {});
     try {
       await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 });
     } catch {}
