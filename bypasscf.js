@@ -776,33 +776,32 @@ async function login(page, username, password, retryCount = 3) {
   console.log("使用登录表单:", useAlt ? 'signin (首页)' : 'login (模态框)');
 
   if (useAlt) {
-    // 首页 signin 表单：先让元素可见，再用 type 填写
-    console.log("填写首页 signin 表单...");
-    // 让隐藏的表单元素可见
-    await page.evaluate(() => {
-      ['#signin_username', '#signin_password', '#signin-button'].forEach(sel => {
-        const el = document.querySelector(sel);
-        if (el) { el.style.display = 'block'; el.style.visibility = 'visible'; el.style.opacity = '1'; }
-      });
-      // 也显示父容器
-      const form = document.querySelector('#signin-form, .login-form, form');
-      if (form) { form.style.display = 'block'; form.style.visibility = 'visible'; }
-    }).catch(() => {});
-    await delayClick(500);
-    // 填写用户名
-    await page.click('#signin_username', { clickCount: 3 }).catch(() => {});
-    await page.type('#signin_username', username, { delay: 50 });
-    await delayClick(500);
-    // 填写密码
-    await page.click('#signin_password', { clickCount: 3 }).catch(() => {});
-    await page.type('#signin_password', password, { delay: 50 });
-    await delayClick(500);
-    // 点击登录
-    await page.click('#signin-button').catch(() => {});
-    try {
-      await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 });
-    } catch {}
-    await delayClick(2000);
+    // 首页 signin 表单：用 Discourse session API 登入
+    console.log("使用 Discourse session API 登入...");
+    const apiResult = await page.evaluate(async (user, pass) => {
+      try {
+        const csrfResp = await fetch('/session/csrf.json', { credentials: 'same-origin' });
+        const csrfData = await csrfResp.json();
+        const resp = await fetch('/session', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'X-CSRF-Token': csrfData.csrf,
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+          credentials: 'same-origin',
+          body: `login=${encodeURIComponent(user)}&password=${encodeURIComponent(pass)}`,
+        });
+        const data = await resp.json();
+        return { status: resp.status, ok: resp.ok, error: data.error, message: data.message };
+      } catch (e) { return { error: e.message }; }
+    }, username, password);
+    console.log("API 登入结果:", JSON.stringify(apiResult));
+    if (apiResult.ok) {
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await waitForCf(page, null);
+      await delayClick(2000);
+    }
     return;
   }
 
