@@ -768,42 +768,49 @@ async function login(page, username, password, retryCount = 3) {
   await page.type('#login-account-name', username, { delay: 100 });
   await delayClick(1000);
 
-  // 点击 "使用密碼登入"（/login 页面默认显示社交登录）
-  await page.evaluate(() => {
-    const btn = Array.from(document.querySelectorAll('button, a, .btn')).find(el =>
-      el.textContent.includes('使用密碼') || el.textContent.includes('use password')
-    );
-    if (btn) btn.click();
-  }).catch(() => {});
-  await delayClick(2000);
+  // 确定使用哪套 selector（首页用 signin_*，/login 页面用 login-account-*）
+  const useAlt = await page.$('#signin_username');
+  const nameSelector = useAlt ? '#signin_username' : '#login-account-name';
+  const pwSelector = useAlt ? '#signin_password' : '#login-account-password';
+  const btnSelector = useAlt ? '#signin-button' : '#login-button';
+  console.log("使用登录表单:", useAlt ? 'signin (首页)' : 'login (模态框)');
+
+  // 如果是 /login 模态框，需要先点击 "使用密碼登入"
+  if (!useAlt) {
+    await page.evaluate(() => {
+      const btn = Array.from(document.querySelectorAll('button, a, .btn')).find(el =>
+        el.textContent.includes('使用密碼') || el.textContent.includes('use password')
+      );
+      if (btn) btn.click();
+    }).catch(() => {});
+    await delayClick(2000);
+  }
 
   // 等待密码输入框
-  const pwInput = await page.waitForSelector('#login-account-password', { timeout: 10000 }).catch(() => null);
+  const pwInput = await page.waitForSelector(pwSelector, { timeout: 10000 }).catch(() => null);
   if (!pwInput) {
-    // Debug: 检查页面上有什么
-    const debug = await page.evaluate(() => ({
-      url: window.location.href,
-      title: document.title,
-      inputs: Array.from(document.querySelectorAll('input')).map(i => i.id || i.name).slice(0, 10),
-      hasPwField: !!document.querySelector('#login-account-password'),
-    })).catch(() => ({}));
-    console.log("密码输入框未出现，页面状态:", JSON.stringify(debug));
+    console.log("密码输入框未出现，selector:", pwSelector);
     if (retryCount > 0) return await login(page, username, password, retryCount - 1);
     return;
   }
 
-  // 输入密码
-  await page.click('#login-account-password', { clickCount: 3 });
-  await page.type('#login-account-password', password, { delay: 100 });
+  // 输入用户名
+  await page.click(nameSelector, { clickCount: 3 });
+  await page.type(nameSelector, username, { delay: 100 });
+  await delayClick(1000);
+
+  // 输入密码（用 keyboard.type 避免元素被移除后 selector 失效）
+  await pwInput.focus();
+  await page.keyboard.type(password, { delay: 100 });
   await delayClick(1000);
 
   // 点击登录
-  await page.click('#login-button');
+  await page.click(btnSelector);
   await delayClick(1000);
   try {
     await Promise.all([
       page.waitForNavigation({ waitUntil: 'domcontentloaded' }),
-      page.click('#login-button', { force: true }),
+      page.click(btnSelector, { force: true }),
     ]);
   } catch (error) {
     if (retryCount > 0) {
