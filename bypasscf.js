@@ -827,15 +827,8 @@ async function login(page, username, password, retryCount = 3) {
             if (controller) {
               controller.set('loginName', user);
               controller.set('loginPassword', pass);
-              // 调用 Ember 的 authenticate 方法
-              if (controller.authenticate) {
-                controller.authenticate();
-                return { method: 'ember-controller', ok: true };
-              }
-              if (controller.send) {
-                controller.send('authenticate');
-                return { method: 'ember-send', ok: true };
-              }
+              // 不调用 authenticate，设值后点按钮让 Ember 处理
+              return { method: 'ember-set', ok: true };
             }
           }
           // 方法 2: 用 nativeInputValueSetter 触发 Ember 绑定
@@ -858,6 +851,17 @@ async function login(page, username, password, retryCount = 3) {
         } catch (e) { return { error: e.message }; }
       }, username, password);
       console.log("登入方式:", JSON.stringify(loginResult));
+      // 设值后点登录按钮让 Ember 处理
+      await page.evaluate(() => {
+        const btn = document.querySelector('#login-button');
+        if (btn) btn.click();
+      }).catch(() => {});
+      await delayClick(1000);
+      // 再点一次 force
+      await page.evaluate(() => {
+        const btn = document.querySelector('#login-button');
+        if (btn) btn.click();
+      }).catch(() => {});
       try {
         await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 });
       } catch {}
