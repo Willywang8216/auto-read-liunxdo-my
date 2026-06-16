@@ -775,16 +775,37 @@ async function login(page, username, password, retryCount = 3) {
   const btnSelector = useAlt ? '#signin-button' : '#login-button';
   console.log("使用登录表单:", useAlt ? 'signin (首页)' : 'login (模态框)');
 
-  // 如果是 /login 模态框，需要先点击 "使用密碼登入"
-  if (!useAlt) {
+  if (useAlt) {
+    // 首页 signin 表单：用 evaluate 直接设置值（元素可能不可见）
+    console.log("使用 evaluate 直接填写 signin 表单...");
+    await page.evaluate((user, pass) => {
+      const nameInput = document.querySelector('#signin_username');
+      const pwInput = document.querySelector('#signin_password');
+      if (nameInput) { nameInput.value = user; nameInput.dispatchEvent(new Event('input', { bubbles: true })); }
+      if (pwInput) { pwInput.value = pass; pwInput.dispatchEvent(new Event('input', { bubbles: true })); }
+    }, username, password);
+    await delayClick(1000);
+    // 提交表单
     await page.evaluate(() => {
-      const btn = Array.from(document.querySelectorAll('button, a, .btn')).find(el =>
-        el.textContent.includes('使用密碼') || el.textContent.includes('use password')
-      );
+      const btn = document.querySelector('#signin-button');
       if (btn) btn.click();
-    }).catch(() => {});
+    });
+    await delayClick(1000);
+    try {
+      await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 });
+    } catch {}
     await delayClick(2000);
+    return;
   }
+
+  // /login 模态框：需要先点击 "使用密碼登入"
+  await page.evaluate(() => {
+    const btn = Array.from(document.querySelectorAll('button, a, .btn')).find(el =>
+      el.textContent.includes('使用密碼') || el.textContent.includes('use password')
+    );
+    if (btn) btn.click();
+  }).catch(() => {});
+  await delayClick(2000);
 
   // 等待密码输入框
   const pwInput = await page.waitForSelector(pwSelector, { timeout: 10000 }).catch(() => null);
