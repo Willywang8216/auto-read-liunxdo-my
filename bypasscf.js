@@ -711,6 +711,16 @@ async function login(page, username, password, retryCount = 3) {
   // 先等待 CF challenge 通过，否则找不到登录表单
   await waitForCf(page, null);
   await delayClick(2000);
+  // 关闭 "you were logged out" 等弹窗，否则会挡住登录表单
+  await page.evaluate(() => {
+    // 关闭 Discourse 的 flash message / modal
+    document.querySelectorAll('.modal-close, .close-modal, .btn-dismiss-modal, button.modal-close').forEach(b => b.click());
+    // 关闭 "you were logged out" 弹窗（通常是 .modal-body 里的 OK 按钮）
+    document.querySelectorAll('.modal-footer .btn-primary, .modal .btn.ok').forEach(b => b.click());
+    // 移除 flash 通知
+    document.querySelectorAll('.alert-info, .alert-warning, .ember-view.flash-message').forEach(el => el.remove());
+  }).catch(() => {});
+  await delayClick(1000);
   // 使用XPath查询找到包含"登录"或"login"文本的按钮
   let loginButtonFound = await page.evaluate(() => {
     let loginButton = Array.from(document.querySelectorAll("button")).find(
@@ -761,9 +771,14 @@ async function login(page, username, password, retryCount = 3) {
   }); // 输入时在每个按键之间添加额外的延迟
   await delayClick(1000);
   // 等待密码输入框加载
-  // await page.waitForSelector("#login-account-password");
-  // 模拟人类在输入用户名后的短暂停顿
-  // delayClick; // 清空输入框并输入密码
+  await page.waitForSelector("#login-account-password", { timeout: 10000 }).catch(async () => {
+    // 如果找不到密码框，可能需要先关闭弹窗再重试
+    console.log("找不到密码输入框，尝试关闭弹窗...");
+    await page.evaluate(() => {
+      document.querySelectorAll('.modal-footer .btn-primary, .modal .btn.ok, .modal-close').forEach(b => b.click());
+    }).catch(() => {});
+    await delayClick(1000);
+  });
   await page.click("#login-account-password", { clickCount: 3 });
   await page.type("#login-account-password", password, {
     delay: 100,
