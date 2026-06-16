@@ -532,6 +532,20 @@ async function launchBrowserForUser(username, password, cookie = null) {
     }
 
     //真正执行阅读脚本
+
+    // 关闭 "You were logged out" 弹窗（可能在登入后出现）
+    await page.evaluate(() => {
+      const refreshBtn = document.querySelector('.dialog-footer .btn-primary');
+      if (refreshBtn && refreshBtn.textContent.includes('Refresh')) {
+        refreshBtn.click();
+        return true;
+      }
+      return false;
+    }).then(clicked => {
+      if (clicked) console.log("关闭了 'You were logged out' 弹窗，刷新页面...");
+    }).catch(() => {});
+    await delayClick(3000);
+
     let externalScriptPath;
     if (isLikeSpecificUser === "true") {
       const randomChoice = Math.random() < 0.5; // 生成一个随机数，50% 概率为 true
