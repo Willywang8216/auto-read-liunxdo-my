@@ -440,12 +440,15 @@ async function launchBrowserForUser(username, password, cookie = null) {
     // 登录操作：优先使用Cookie，否则使用表单登录
     let cookieLoginAttempted = false;
     let cookieLoginFailed = false;
-    let savedCookieValue = null; // 保存 cookie 值以便 CF 后重新设置
-    if (cookie) {
-      console.log("检测到Cookie，跳过表单登录，直接设置Cookie");
+    let savedCookieValue = null;
+    const domain = new URL(loginUrl).hostname;
+    const cookieObjects = cookie ? parseCookieString(cookie, domain) : [];
+    const hasT = cookieObjects.some(c => c.name === '_t');
+    const hasForumSession = cookieObjects.some(c => c.name === '_forum_session');
+    // 只有同时有 _t 和 _forum_session 才尝试 cookie 登入
+    if (cookie && hasT && hasForumSession) {
+      console.log("检测到Cookie (_t + _forum_session)，尝试Cookie登录");
       cookieLoginAttempted = true;
-      const domain = new URL(loginUrl).hostname;
-      const cookieObjects = parseCookieString(cookie, domain);
       // 保存 _t cookie 值用于 CF 后重新设置
       const tObj = cookieObjects.find(c => c.name === '_t');
       if (tObj) savedCookieValue = tObj.value;
@@ -484,6 +487,11 @@ async function launchBrowserForUser(username, password, cookie = null) {
         await waitForCf(page, browser);
       }
       await delayClick(2000);
+    } else if (cookie && hasT && !hasForumSession) {
+      // 有 _t 但没有 _forum_session，直接走密码登入
+      console.log("Cookie 不完整（只有 _t，缺少 _forum_session），直接密码登录...");
+      // 不额外导航，直接在当前页面登入（避免触发新 CF）
+      await login(page, username, password);
     } else {
       console.log("登录操作");
       await login(page, username, password);
@@ -497,10 +505,7 @@ async function launchBrowserForUser(username, password, cookie = null) {
     if ((authButtons || !avatarImg) && cookieLoginAttempted && password) {
       console.log("Cookie 已过期，自动退回密码登录...");
       cookieLoginFailed = true;
-      // 直接导航到 /login 页面触发登录表单
-      await page.goto(loginUrl + "/login", { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
-      await waitForCf(page, browser);
-      await delayClick(2000);
+      // 不额外导航，直接在当前已通过 CF 的页面上登入
       await login(page, username, password);
       avatarImg = await page.$("img.avatar");
       authButtons = await page.$("span.auth-buttons");
@@ -709,136 +714,96 @@ async function launchBrowserForUser(username, password, cookie = null) {
   }
 }
 async function login(page, username, password, retryCount = 3) {
-  // 先等待 CF challenge 通过，否则找不到登录表单
+  // 等待 CF 通过
   await waitForCf(page, null);
-  await delayClick(2000);
-  // 关闭 "you were logged out" 等弹窗（Discourse 用 .dialog-footer 不是 .modal-footer）
+  await delayClick(1000);
+
+  // 关闭 "you were logged out" 等弹窗
   await page.evaluate(() => {
-    document.querySelectorAll('.dialog-footer .btn-primary, .dialog-footer .btn, .modal-footer .btn-primary').forEach(b => b.click());
-    document.querySelectorAll('.alert-info, .alert-warning, .ember-view.flash-message').forEach(el => el.remove());
+    document.querySelectorAll('.dialog-footer .btn-primary, .dialog-footer .btn').forEach(b => b.click());
+    document.querySelectorAll('.alert-info, .alert-warning').forEach(el => el.remove());
   }).catch(() => {});
   await delayClick(2000);
-  // 如果已经在 /login 页面，直接等待输入框出现
-  const currentUrl = page.url();
-  if (currentUrl.includes('/login')) {
-    console.log("已在登录页面，等待输入框...");
-  } else {
-    // 使用XPath查询找到包含"登录"或"login"文本的按钮
-  let loginButtonFound = await page.evaluate(() => {
-    let loginButton = Array.from(document.querySelectorAll("button")).find(
-      (button) =>
-        button.textContent.includes("登录") ||
-        button.textContent.includes("login")
-    ); // 注意loginButton 变量在外部作用域中是无法被 page.evaluate 内部的代码直接修改的。page.evaluate 的代码是在浏览器环境中执行的，这意味着它们无法直接影响 Node.js 环境中的变量
-    // 如果没有找到，尝试根据类名查找
-    if (!loginButton) {
-      loginButton = document.querySelector(".login-button");
+
+  // 如果没有 #login-account-name，需要先打开登录模态框
+  let hasLoginForm = await page.$('#login-account-name');
+  if (!hasLoginForm) {
+    console.log("查找登录按钮...");
+    // 尝试点击页面上的 "登入" 按钮
+    const clicked = await page.evaluate(() => {
+      const btn = Array.from(document.querySelectorAll('button, a')).find(el =>
+        el.textContent.includes('登入') || el.textContent.includes('login') || el.textContent.includes('登录')
+      );
+      if (btn) { btn.click(); return true; }
+      return false;
+    });
+    if (!clicked) {
+      console.log("找不到登录按钮，尝试点击 header 登录链接...");
+      await page.click('.header-buttons .login-button, .login-button').catch(() => {});
     }
-    if (loginButton) {
-      loginButton.click();
-      console.log("Login button clicked.");
-      return true; // 返回true表示找到了按钮并点击了
-    } else {
-      console.log("Login button not found.");
-      return false; // 返回false表示没有找到按钮
-    }
-  });
-  if (!loginButtonFound) {
-    if (loginUrl == "https://meta.appinn.net") {
-      await page.goto("https://meta.appinn.net/t/topic/52006", {
-        waitUntil: "domcontentloaded",
-        timeout: parseInt(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT || "120000", 10),
-      });
-      await page.click(".discourse-reactions-reaction-button");
-    } else {
-      await page.goto(`${loginUrl}/t/topic/1`, {
-        waitUntil: "domcontentloaded",
-        timeout: parseInt(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT || "120000", 10),
-      });
-      try {
-        await page.click(".discourse-reactions-reaction-button");
-      } catch (error) {
-        console.log("没有找到点赞按钮，可能是页面没有加载完成或按钮不存在");
-      }
-    }
-  }
-  } // end of if/else for /login page check
-  // 等待用户名输入框加载
-  await page.waitForSelector("#login-account-name");
-  // 模拟人类在找到输入框后的短暂停顿
-  await delayClick(1000); // 延迟500毫秒
-  // 清空输入框并输入用户名
-  await page.click("#login-account-name", { clickCount: 3 });
-  await page.type("#login-account-name", username, {
-    delay: 100,
-  }); // 输入时在每个按键之间添加额外的延迟
-  await delayClick(1000);
-  // 等待密码输入框加载
-  let passwordInput = await page.$("#login-account-password");
-  if (!passwordInput) {
-    console.log("找不到密码输入框，尝试关闭弹窗后重试...");
-    await page.evaluate(() => {
-      document.querySelectorAll('.dialog-footer .btn-primary, .dialog-footer .btn, .modal-footer .btn-primary').forEach(b => b.click());
-    }).catch(() => {});
     await delayClick(3000);
-    // 如果还是找不到，重新导航到 /login
-    passwordInput = await page.$("#login-account-password");
-    if (!passwordInput) {
-      console.log("弹窗关闭后仍找不到密码框，重新导航到 /login...");
-      await page.goto(loginUrl + "/login", { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
-      await waitForCf(page, null);
-      await delayClick(2000);
-    }
   }
-  await page.waitForSelector("#login-account-password", { timeout: 15000 });
-  await page.click("#login-account-password", { clickCount: 3 });
-  await page.type("#login-account-password", password, {
-    delay: 100,
-  });
 
-  // 模拟人类在输入完成后思考的短暂停顿
+  // 等待用户名输入框（如果还是没有，说明登录模态框没打开）
+  hasLoginForm = await page.waitForSelector('#login-account-name', { timeout: 10000 }).catch(() => null);
+  if (!hasLoginForm) {
+    console.log("登录模态框未打开，跳过登录");
+    return;
+  }
+
+  await delayClick(1000);
+  await page.click('#login-account-name', { clickCount: 3 });
+  await page.type('#login-account-name', username, { delay: 100 });
   await delayClick(1000);
 
-  // 假设登录按钮的ID是'login-button'，点击登录按钮
-  await page.waitForSelector("#login-button");
-  await delayClick(1000); // 模拟在点击登录按钮前的短暂停顿
-  await page.click("#login-button");
+  // 等待密码输入框
+  const passwordInput = await page.waitForSelector('#login-account-password', { timeout: 10000 }).catch(() => null);
+  if (!passwordInput) {
+    console.log("密码输入框未出现，可能需要点击 '使用密碼登入'");
+    await page.evaluate(() => {
+      const btn = Array.from(document.querySelectorAll('button, a')).find(el =>
+        el.textContent.includes('使用密碼') || el.textContent.includes('use password')
+      );
+      if (btn) btn.click();
+    }).catch(() => {});
+    await delayClick(2000);
+    await page.waitForSelector('#login-account-password', { timeout: 10000 });
+  }
+
+  await page.click('#login-account-password', { clickCount: 3 });
+  await page.type('#login-account-password', password, { delay: 100 });
+  await delayClick(1000);
+
+  // 点击登录按钮
+  await page.waitForSelector('#login-button');
+  await delayClick(1000);
+  await page.click('#login-button');
   try {
     await Promise.all([
-      page.waitForNavigation({ waitUntil: "domcontentloaded" }), // 等待 页面跳转 DOMContentLoaded 事件
-      // 去掉上面一行会报错：Error: Execution context was destroyed, most likely because of a navigation. 可能是因为之后没等页面加载完成就执行了脚本
-      page.click("#login-button", { force: true }), // 点击登录按钮触发跳转
-    ]); //注意如果登录失败，这里会一直等待跳转，导致脚本执行失败 这点四个月之前你就发现了结果今天又遇到（有个用户遇到了https://linux.do/t/topic/169209/82），但是你没有在这个报错你提示我8.5
+      page.waitForNavigation({ waitUntil: 'domcontentloaded' }),
+      page.click('#login-button', { force: true }),
+    ]);
   } catch (error) {
-    const alertError = await page.$(".alert.alert-error");
+    const alertError = await page.$('.alert.alert-error');
     if (alertError) {
-      const alertText = await page.evaluate((el) => el.innerText, alertError); // 使用 evaluate 获取 innerText
-      if (
-        alertText.includes("incorrect") ||
-        alertText.includes("Incorrect ") ||
-        alertText.includes("不正确")
-      ) {
-        throw new Error(
-          `非超时错误，请检查用户名密码是否正确，失败用户 ${maskUsername(username)}, 错误信息：${alertText}`
-        );
+      const alertText = await page.evaluate(el => el.innerText, alertError);
+      if (alertText.includes('incorrect') || alertText.includes('Incorrect') || alertText.includes('不正确')) {
+        throw new Error(`密码错误，失败用户 ${maskUsername(username)}`);
       } else {
-        throw new Error(
-          `非超时错误，也不是密码错误，可能是IP导致，需使用中国美国香港台湾IP，失败用户 ${maskUsername(username)}，错误信息：${alertText}`
-        );
+        throw new Error(`登录错误 ${maskUsername(username)}: ${alertText}`);
       }
     } else {
       if (retryCount > 0) {
         console.log("Retrying login...");
-        await page.reload({ waitUntil: "domcontentloaded", timeout: parseInt(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT || "120000", 10) });
-        await delayClick(2000); // 增加重试前的延迟
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: parseInt(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT || "120000", 10) });
+        await delayClick(2000);
         return await login(page, username, password, retryCount - 1);
       } else {
-        throw new Error(
-          `Navigation timed out in login.超时了,可能是IP质量问题,失败用户 ${maskUsername(username)}, 
-      ${error}`
-        ); //{password}
+        throw new Error(`登录超时 ${maskUsername(username)}: ${error.message}`);
       }
     }
+  }
+}
   }
   await delayClick(1000);
 }
