@@ -774,14 +774,23 @@ async function login(page, username, password, retryCount = 3) {
   }); // 输入时在每个按键之间添加额外的延迟
   await delayClick(1000);
   // 等待密码输入框加载
-  await page.waitForSelector("#login-account-password", { timeout: 10000 }).catch(async () => {
-    // 如果找不到密码框，可能需要先关闭弹窗再重试
-    console.log("找不到密码输入框，尝试关闭弹窗...");
+  let passwordInput = await page.$("#login-account-password");
+  if (!passwordInput) {
+    console.log("找不到密码输入框，尝试关闭弹窗后重试...");
     await page.evaluate(() => {
       document.querySelectorAll('.dialog-footer .btn-primary, .dialog-footer .btn, .modal-footer .btn-primary').forEach(b => b.click());
     }).catch(() => {});
-    await delayClick(2000);
-  });
+    await delayClick(3000);
+    // 如果还是找不到，重新导航到 /login
+    passwordInput = await page.$("#login-account-password");
+    if (!passwordInput) {
+      console.log("弹窗关闭后仍找不到密码框，重新导航到 /login...");
+      await page.goto(loginUrl + "/login", { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+      await waitForCf(page, null);
+      await delayClick(2000);
+    }
+  }
+  await page.waitForSelector("#login-account-password", { timeout: 15000 });
   await page.click("#login-account-password", { clickCount: 3 });
   await page.type("#login-account-password", password, {
     delay: 100,
