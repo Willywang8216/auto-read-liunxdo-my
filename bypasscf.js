@@ -690,18 +690,17 @@ async function launchBrowserForUser(username, password, cookie = null) {
       });
       console.log(`阅读状态检查: read=${readingStatus.read}, 待阅读=${readingStatus.topicList}篇`);
       if (readingStatus.read !== "true" || readingStatus.topicList === 0) {
-        console.warn("阅读脚本可能未正常运行，尝试重新注入...");
-        await page.evaluate(
-          (specificUser, scriptToEval, isAutoLike) => {
-            localStorage.setItem("read", true);
-            localStorage.setItem("isFirstRun", "false");
-            localStorage.setItem("autoLikeEnabled", isAutoLike);
-            try { eval(scriptToEval); } catch (e) { console.error("re-inject failed", e); }
-          },
-          specificUser,
-          externalScript,
-          isAutoLike
-        );
+        console.warn("阅读脚本可能未正常运行，重置 isFirstRun 触发话题获取...");
+        // 重置 isFirstRun 让 index.js 重新获取话题列表
+        await page.evaluate(() => {
+          localStorage.removeItem("isFirstRun");
+          localStorage.removeItem("topicList");
+          localStorage.setItem("read", true);
+        });
+        // 刷新页面让脚本重新执行
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await waitForCf(page, browser);
+        await delayClick(8000);
       }
     } catch (e) {
       console.warn("阅读状态检查失败:", e.message);
