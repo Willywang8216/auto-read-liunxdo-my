@@ -862,25 +862,39 @@ async function login(page, username, password, retryCount = 3) {
       }
     }
 
-    // 模态框内容不符合预期，尝试 API
-    console.log("模态框字段不完整，尝试 API...");
+    // 模态框内容不符合预期，尝试 XMLHttpRequest API
+    console.log("模态框字段不完整，尝试 XMLHttpRequest API...");
     const apiResult = await page.evaluate(async (user, pass) => {
-      try {
-        const csrfResp = await fetch('/session/csrf.json', { credentials: 'same-origin' });
-        const csrfData = await csrfResp.json();
-        const resp = await fetch('/session', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'X-CSRF-Token': csrfData.csrf,
-            'X-Requested-With': 'XMLHttpRequest',
-          },
-          credentials: 'same-origin',
-          body: `login=${encodeURIComponent(user)}&password=${encodeURIComponent(pass)}`,
-        });
-        const data = await resp.json();
-        return { status: resp.status, ok: resp.ok, error: data.error };
-      } catch (e) { return { error: e.message }; }
+      return new Promise((resolve) => {
+        try {
+          // 先获取 CSRF
+          const csrfXhr = new XMLHttpRequest();
+          csrfXhr.open('GET', '/session/csrf.json', true);
+          csrfXhr.withCredentials = true;
+          csrfXhr.onload = function() {
+            try {
+              const csrfData = JSON.parse(csrfXhr.responseText);
+              // 用 XMLHttpRequest 发送登录请求
+              const xhr = new XMLHttpRequest();
+              xhr.open('POST', '/session', true);
+              xhr.withCredentials = true;
+              xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+              xhr.setRequestHeader('X-CSRF-Token', csrfData.csrf);
+              xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+              xhr.onload = function() {
+                try {
+                  const data = JSON.parse(xhr.responseText);
+                  resolve({ status: xhr.status, ok: xhr.status === 200, error: data.error });
+                } catch(e) { resolve({ status: xhr.status, error: 'parse error', text: xhr.responseText.substring(0, 100) }); }
+              };
+              xhr.onerror = function() { resolve({ error: 'network error' }); };
+              xhr.send(`login=${encodeURIComponent(user)}&password=${encodeURIComponent(pass)}`);
+            } catch(e) { resolve({ error: 'csrf error: ' + e.message }); }
+          };
+          csrfXhr.onerror = function() { resolve({ error: 'csrf network error' }); };
+          csrfXhr.send();
+        } catch(e) { resolve({ error: e.message }); }
+      });
     }, username, password);
     console.log("API 结果:", JSON.stringify(apiResult));
     if (apiResult.ok) {
