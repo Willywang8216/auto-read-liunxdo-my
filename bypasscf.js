@@ -711,16 +711,21 @@ async function login(page, username, password, retryCount = 3) {
   // 先等待 CF challenge 通过，否则找不到登录表单
   await waitForCf(page, null);
   await delayClick(2000);
-  // 关闭 "you were logged out" 等弹窗，否则会挡住登录表单
+  // 关闭 "you were logged out" 等弹窗（Discourse 用 .dialog-footer 不是 .modal-footer）
   await page.evaluate(() => {
-    // 关闭 Discourse 的 flash message / modal
-    document.querySelectorAll('.modal-close, .close-modal, .btn-dismiss-modal, button.modal-close').forEach(b => b.click());
-    // 关闭 "you were logged out" 弹窗（通常是 .modal-body 里的 OK 按钮）
-    document.querySelectorAll('.modal-footer .btn-primary, .modal .btn.ok').forEach(b => b.click());
+    // 关闭 Discourse dialog 弹窗（"you were logged out" / "Refresh" 按钮）
+    document.querySelectorAll('.dialog-footer .btn-primary, .dialog-footer .btn, .modal-footer .btn-primary').forEach(b => b.click());
     // 移除 flash 通知
     document.querySelectorAll('.alert-info, .alert-warning, .ember-view.flash-message').forEach(el => el.remove());
   }).catch(() => {});
-  await delayClick(1000);
+  await delayClick(2000);
+  // 再检查一次弹窗是否还在
+  const hasDialog = await page.$('.dialog-footer .btn-primary').catch(() => null);
+  if (hasDialog) {
+    console.log("弹窗还在，再次尝试关闭...");
+    await page.click('.dialog-footer .btn-primary').catch(() => {});
+    await delayClick(2000);
+  }
   // 使用XPath查询找到包含"登录"或"login"文本的按钮
   let loginButtonFound = await page.evaluate(() => {
     let loginButton = Array.from(document.querySelectorAll("button")).find(
@@ -775,9 +780,9 @@ async function login(page, username, password, retryCount = 3) {
     // 如果找不到密码框，可能需要先关闭弹窗再重试
     console.log("找不到密码输入框，尝试关闭弹窗...");
     await page.evaluate(() => {
-      document.querySelectorAll('.modal-footer .btn-primary, .modal .btn.ok, .modal-close').forEach(b => b.click());
+      document.querySelectorAll('.dialog-footer .btn-primary, .dialog-footer .btn, .modal-footer .btn-primary').forEach(b => b.click());
     }).catch(() => {});
-    await delayClick(1000);
+    await delayClick(2000);
   });
   await page.click("#login-account-password", { clickCount: 3 });
   await page.type("#login-account-password", password, {
