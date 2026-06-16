@@ -800,7 +800,14 @@ async function login(page, username, password, retryCount = 3) {
   // 等待密码输入框
   const pwInput = await page.waitForSelector('#login-account-password', { timeout: 10000 }).catch(() => null);
   if (!pwInput) {
-    console.log("密码输入框未出现");
+    // Debug: 检查页面上有什么
+    const debug = await page.evaluate(() => ({
+      url: window.location.href,
+      title: document.title,
+      inputs: Array.from(document.querySelectorAll('input')).map(i => i.id || i.name).slice(0, 10),
+      hasPwField: !!document.querySelector('#login-account-password'),
+    })).catch(() => ({}));
+    console.log("密码输入框未出现，页面状态:", JSON.stringify(debug));
     if (retryCount > 0) return await login(page, username, password, retryCount - 1);
     return;
   }
