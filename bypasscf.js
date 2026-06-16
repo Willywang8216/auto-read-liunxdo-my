@@ -816,50 +816,53 @@ async function login(page, username, password, retryCount = 3) {
     console.log("模态框内容:", JSON.stringify(modalDebug));
 
     if (modalDebug.hasName && modalDebug.hasPw) {
-      // 两个字段都在！让密码字段及其父容器可见
-      console.log("两个字段都存在，让密码字段可见...");
-      await page.evaluate(() => {
-        // 让密码字段及其所有父元素可见
-        let el = document.querySelector('#login-account-password');
-        while (el) {
-          el.style.display = 'block';
-          el.style.visibility = 'visible';
-          el.style.opacity = '1';
-          el.style.height = 'auto';
-          el.style.overflow = 'visible';
-          el = el.parentElement;
-        }
-        // 也显示用户名字段
-        let el2 = document.querySelector('#login-account-name');
-        while (el2) {
-          el2.style.display = 'block';
-          el2.style.visibility = 'visible';
-          el2.style.opacity = '1';
-          el2 = el2.parentElement;
-        }
-      }).catch(() => {});
-      await delayClick(500);
-      // 填写用户名
-      await page.click('#login-account-name', { clickCount: 3 }).catch(() => {});
-      await page.type('#login-account-name', username, { delay: 100 });
-      await delayClick(500);
-      // 填写密码
-      const pwEl = await page.$('#login-account-password');
-      if (pwEl) {
-        await pwEl.focus();
-        await page.keyboard.type(password, { delay: 100 });
-        await delayClick(1000);
-        // 点击登录按钮
-        await page.evaluate(() => {
-          const btn = document.querySelector('#login-button');
-          if (btn) { btn.style.display = 'block'; btn.style.visibility = 'visible'; btn.click(); }
-        });
+      // 两个字段都在！通过 Ember 控制器设置值（DOM 值 Ember 不读取）
+      console.log("两个字段都存在，通过 Ember 设置值...");
+      const loginResult = await page.evaluate(async (user, pass) => {
         try {
-          await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 });
-        } catch {}
-        await delayClick(2000);
-        return;
-      }
+          // 方法 1: 通过 Ember container 获取 LoginController 并设置属性
+          const app = window.Discourse || window.App;
+          if (app && app.__container__) {
+            const controller = app.__container__.lookup('controller:login');
+            if (controller) {
+              controller.set('loginName', user);
+              controller.set('loginPassword', pass);
+              // 调用 Ember 的 authenticate 方法
+              if (controller.authenticate) {
+                controller.authenticate();
+                return { method: 'ember-controller', ok: true };
+              }
+              if (controller.send) {
+                controller.send('authenticate');
+                return { method: 'ember-send', ok: true };
+              }
+            }
+          }
+          // 方法 2: 用 nativeInputValueSetter 触发 Ember 绑定
+          const nameInput = document.querySelector('#login-account-name');
+          const pwInput = document.querySelector('#login-account-password');
+          if (nameInput && pwInput) {
+            const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            nativeSetter.call(nameInput, user);
+            nameInput.dispatchEvent(new Event('input', { bubbles: true }));
+            nameInput.dispatchEvent(new Event('change', { bubbles: true }));
+            nativeSetter.call(pwInput, pass);
+            pwInput.dispatchEvent(new Event('input', { bubbles: true }));
+            pwInput.dispatchEvent(new Event('change', { bubbles: true }));
+            // 点击登录按钮
+            const btn = document.querySelector('#login-button');
+            if (btn) btn.click();
+            return { method: 'native-setter', ok: true };
+          }
+          return { error: 'no inputs found' };
+        } catch (e) { return { error: e.message }; }
+      }, username, password);
+      console.log("登入方式:", JSON.stringify(loginResult));
+      try {
+        await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 });
+      } catch {}
+      await delayClick(2000);
+      return;
     }
 
     // 模态框内容不符合预期，尝试 XMLHttpRequest API
