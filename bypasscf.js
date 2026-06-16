@@ -497,9 +497,10 @@ async function launchBrowserForUser(username, password, cookie = null) {
     if ((authButtons || !avatarImg) && cookieLoginAttempted && password) {
       console.log("Cookie 已过期，自动退回密码登录...");
       cookieLoginFailed = true;
-      // 先导航到干净的页面，清除 "you were logged out" 弹窗状态
-      await page.goto(loginUrl + "/t/topic/1", { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+      // 直接导航到 /login 页面触发登录表单
+      await page.goto(loginUrl + "/login", { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
       await waitForCf(page, browser);
+      await delayClick(2000);
       await login(page, username, password);
       avatarImg = await page.$("img.avatar");
       authButtons = await page.$("span.auth-buttons");
@@ -713,20 +714,16 @@ async function login(page, username, password, retryCount = 3) {
   await delayClick(2000);
   // 关闭 "you were logged out" 等弹窗（Discourse 用 .dialog-footer 不是 .modal-footer）
   await page.evaluate(() => {
-    // 关闭 Discourse dialog 弹窗（"you were logged out" / "Refresh" 按钮）
     document.querySelectorAll('.dialog-footer .btn-primary, .dialog-footer .btn, .modal-footer .btn-primary').forEach(b => b.click());
-    // 移除 flash 通知
     document.querySelectorAll('.alert-info, .alert-warning, .ember-view.flash-message').forEach(el => el.remove());
   }).catch(() => {});
   await delayClick(2000);
-  // 再检查一次弹窗是否还在
-  const hasDialog = await page.$('.dialog-footer .btn-primary').catch(() => null);
-  if (hasDialog) {
-    console.log("弹窗还在，再次尝试关闭...");
-    await page.click('.dialog-footer .btn-primary').catch(() => {});
-    await delayClick(2000);
-  }
-  // 使用XPath查询找到包含"登录"或"login"文本的按钮
+  // 如果已经在 /login 页面，直接等待输入框出现
+  const currentUrl = page.url();
+  if (currentUrl.includes('/login')) {
+    console.log("已在登录页面，等待输入框...");
+  } else {
+    // 使用XPath查询找到包含"登录"或"login"文本的按钮
   let loginButtonFound = await page.evaluate(() => {
     let loginButton = Array.from(document.querySelectorAll("button")).find(
       (button) =>
@@ -765,6 +762,7 @@ async function login(page, username, password, retryCount = 3) {
       }
     }
   }
+  } // end of if/else for /login page check
   // 等待用户名输入框加载
   await page.waitForSelector("#login-account-name");
   // 模拟人类在找到输入框后的短暂停顿
