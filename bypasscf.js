@@ -335,19 +335,11 @@ async function launchBrowserForUser(username, password, cookie = null) {
   let browser = null; // 在 try 之外声明 browser 变量
   try {
     console.log("当前用户:", maskUsername(username));
-    const profileDir = path.join(process.env.TEMP || process.env.TMP || "/tmp", "linuxdo-profiles", username);
-    // 清理可能损坏的 profile lock 文件
-    const lockFile = path.join(profileDir, "SingletonLock");
-    if (fs.existsSync(lockFile)) {
-      try { fs.unlinkSync(lockFile); } catch {}
-    }
-    if (!fs.existsSync(profileDir)) fs.mkdirSync(profileDir, { recursive: true });
     const browserOptions = {
       headless: "auto",
       args: ["--no-sandbox", "--disable-setuid-sandbox"],
       customConfig: {
         chromePath: "C:\\Users\\willy\\AppData\\Local\\ms-playwright\\chromium-1223\\chrome-win64\\chrome.exe",
-        userDataDir: profileDir,
       },
       connectOption: {
         protocolTimeout: 120000,
@@ -375,19 +367,7 @@ async function launchBrowserForUser(username, password, cookie = null) {
     }
 
     var { connect } = await import("puppeteer-real-browser");
-    let page, newBrowser;
-    try {
-      ({ page, browser: newBrowser } = await connect(browserOptions));
-    } catch (connectErr) {
-      if (connectErr.message.includes('ECONNREFUSED') && profileDir) {
-        console.log("Chrome 启动失败，清理 profile 后重试...");
-        try { fs.rmSync(profileDir, { recursive: true, force: true }); } catch {}
-        fs.mkdirSync(profileDir, { recursive: true });
-        ({ page, browser: newBrowser } = await connect(browserOptions));
-      } else {
-        throw connectErr;
-      }
-    }
+    const { page, browser: newBrowser } = await connect(browserOptions);
     browser = newBrowser; // 将 browser 初始化
     // 启动截图功能
     // takeScreenshots(page);
