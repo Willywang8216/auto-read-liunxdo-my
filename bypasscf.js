@@ -815,41 +815,55 @@ async function login(page, username, password, retryCount = 3) {
     }).catch(() => ({}));
     console.log("模态框内容:", JSON.stringify(modalDebug));
 
-    // 检查模态框是否打开
-    const hasModal = await page.$('#login-account-name');
-    if (hasModal) {
-      console.log("模态框已打开，填写表单...");
-      await page.click('#login-account-name', { clickCount: 3 });
-      await page.type('#login-account-name', username, { delay: 100 });
-      await delayClick(1000);
-      // 点击 "使用密碼登入"
+    if (modalDebug.hasName && modalDebug.hasPw) {
+      // 两个字段都在！让密码字段及其父容器可见
+      console.log("两个字段都存在，让密码字段可见...");
       await page.evaluate(() => {
-        const btn = Array.from(document.querySelectorAll('button, a, .btn')).find(el =>
-          el.textContent.includes('使用密碼') || el.textContent.includes('use password')
-        );
-        if (btn) btn.click();
+        // 让密码字段及其所有父元素可见
+        let el = document.querySelector('#login-account-password');
+        while (el) {
+          el.style.display = 'block';
+          el.style.visibility = 'visible';
+          el.style.opacity = '1';
+          el.style.height = 'auto';
+          el.style.overflow = 'visible';
+          el = el.parentElement;
+        }
+        // 也显示用户名字段
+        let el2 = document.querySelector('#login-account-name');
+        while (el2) {
+          el2.style.display = 'block';
+          el2.style.visibility = 'visible';
+          el2.style.opacity = '1';
+          el2 = el2.parentElement;
+        }
       }).catch(() => {});
-      await delayClick(2000);
-      const pwInput = await page.waitForSelector('#login-account-password', { timeout: 10000 }).catch(() => null);
-      if (pwInput) {
-        await pwInput.focus();
+      await delayClick(500);
+      // 填写用户名
+      await page.click('#login-account-name', { clickCount: 3 }).catch(() => {});
+      await page.type('#login-account-name', username, { delay: 100 });
+      await delayClick(500);
+      // 填写密码
+      const pwEl = await page.$('#login-account-password');
+      if (pwEl) {
+        await pwEl.focus();
         await page.keyboard.type(password, { delay: 100 });
         await delayClick(1000);
-        await page.click('#login-button');
-        await delayClick(1000);
+        // 点击登录按钮
+        await page.evaluate(() => {
+          const btn = document.querySelector('#login-button');
+          if (btn) { btn.style.display = 'block'; btn.style.visibility = 'visible'; btn.click(); }
+        });
         try {
-          await Promise.all([
-            page.waitForNavigation({ waitUntil: 'domcontentloaded' }),
-            page.click('#login-button', { force: true }),
-          ]);
+          await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 });
         } catch {}
         await delayClick(2000);
         return;
       }
     }
 
-    // 模态框打不开或密码框找不到，尝试 API
-    console.log("模态框失败，尝试 Discourse session API...");
+    // 模态框内容不符合预期，尝试 API
+    console.log("模态框字段不完整，尝试 API...");
     const apiResult = await page.evaluate(async (user, pass) => {
       try {
         const csrfResp = await fetch('/session/csrf.json', { credentials: 'same-origin' });
