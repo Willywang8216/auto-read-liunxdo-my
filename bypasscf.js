@@ -698,7 +698,15 @@ async function launchBrowserForUser(username, password, cookie = null) {
 
     // 登录成功后自动更新 cookie 到 .env（保存 _t + _forum_session 供下次使用）
     try {
-      const browserCookies = await page.cookies(loginUrl);
+      // 用 CDP 读取所有 cookie（包括 httpOnly 的 _forum_session）
+      const cdpClient = await page.createCDPSession().catch(() => null);
+      let browserCookies = [];
+      if (cdpClient) {
+        const { cookies } = await cdpClient.send('Network.getAllCookies');
+        browserCookies = cookies.filter(c => c.domain.includes('linux.do'));
+      } else {
+        browserCookies = await page.cookies(loginUrl);
+      }
       const cookieNames = ["_t", "_forum_session"];
       const cookieList = cookieNames
         .map(name => browserCookies.find(c => c.name === name))
@@ -706,7 +714,7 @@ async function launchBrowserForUser(username, password, cookie = null) {
         .map(c => `${c.name}=${c.value}`);
       if (cookieList.length > 0) {
         updateCookieInEnv(username, cookieList);
-        console.log(`Cookie 已自动更新: ${username} (${cookieList.length} cookies)`);
+        console.log(`Cookie 已自动更新: ${username} (${cookieList.length} cookies: ${cookieList.map(c => c.split('=')[0]).join(', ')})`);
       }
     } catch (e) {
       console.warn("Cookie 自动更新失败:", e.message);
