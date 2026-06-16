@@ -714,71 +714,87 @@ async function launchBrowserForUser(username, password, cookie = null) {
   }
 }
 async function login(page, username, password, retryCount = 3) {
-  // 等待 CF 通过
   await waitForCf(page, null);
   await delayClick(1000);
 
-  // 关闭 "you were logged out" 等弹窗
+  // 关闭弹窗
   await page.evaluate(() => {
     document.querySelectorAll('.dialog-footer .btn-primary, .dialog-footer .btn').forEach(b => b.click());
-    document.querySelectorAll('.alert-info, .alert-warning').forEach(el => el.remove());
   }).catch(() => {});
-  await delayClick(2000);
+  await delayClick(1000);
 
-  // 如果没有 #login-account-name，需要先打开登录模态框
-  let hasLoginForm = await page.$('#login-account-name');
-  if (!hasLoginForm) {
-    console.log("查找登录按钮...");
-    // 点击 header 的登录按钮（.login-button）
-    const clicked = await page.evaluate(() => {
-      const btn = document.querySelector('.header-buttons .login-button, .login-button.btn, .btn-primary.login-button');
-      if (btn) { btn.click(); return btn.textContent.trim(); }
-      // 备用：找文字为 "登入" 的按钮
-      const btn2 = Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === '登入');
-      if (btn2) { btn2.click(); return btn2.textContent.trim(); }
-      return null;
-    });
-    console.log("点击结果:", clicked || '未找到');
-    await delayClick(3000);
-  }
+  // 方法 1: 使用 Discourse API 直接登录（绕过 UI）
+  console.log("尝试 API 登录...");
+  const apiResult = await page.evaluate(async (user, pass) => {
+    try {
+      // 获取 CSRF token
+      const csrfResp = await fetch('/session/csrf.json', { credentials: 'same-origin' });
+      const csrfData = await csrfResp.json();
+      const csrfToken = csrfData.csrf;
 
-  // 等待用户名输入框（如果还是没有，说明登录模态框没打开）
-  hasLoginForm = await page.waitForSelector('#login-account-name', { timeout: 10000 }).catch(() => null);
-  if (!hasLoginForm) {
-    console.log("登录模态框未打开，跳过登录");
+      // POST 登录请求
+      const resp = await fetch('/session', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'X-CSRF-Token': csrfToken,
+          'X-Requested-With': 'XMLHttpRequest',
+        },
+        credentials: 'same-origin',
+        body: `login=${encodeURIComponent(user)}&password=${encodeURIComponent(pass)}`,
+      });
+      const data = await resp.json();
+      return { status: resp.status, ok: resp.ok, error: data.error, message: data.message };
+    } catch (e) {
+      return { error: e.message };
+    }
+  }, username, password);
+
+  console.log("API 登录结果:", JSON.stringify(apiResult));
+
+  if (apiResult.ok) {
+    // API 登录成功，刷新页面
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await waitForCf(page, null);
+    await delayClick(2000);
     return;
   }
 
-  await delayClick(1000);
+  // 方法 2: API 失败时回退到 UI 登录
+  console.log("API 登录失败，尝试 UI 登录...");
+  // 点击 header 登录按钮
+  await page.evaluate(() => {
+    const btn = document.querySelector('.header-buttons .login-button, .login-button.btn, .btn-primary.login-button');
+    if (btn) btn.click();
+  }).catch(() => {});
+  await delayClick(3000);
+
+  // 等待用户名输入框
+  const hasForm = await page.waitForSelector('#login-account-name', { timeout: 10000 }).catch(() => null);
+  if (!hasForm) {
+    console.log("登录模态框未打开");
+    return;
+  }
+
+  // 输入用户名
   await page.click('#login-account-name', { clickCount: 3 });
   await page.type('#login-account-name', username, { delay: 100 });
   await delayClick(1000);
 
-  // 点击 "使用密碼登入" 切换到密码表单（Discourse 默认显示社交登录）
-  await delayClick(1000);
+  // 点击 "使用密碼登入"
   await page.evaluate(() => {
     const btn = Array.from(document.querySelectorAll('button, a, .btn')).find(el =>
-      el.textContent.includes('使用密碼') || el.textContent.includes('use password') || el.textContent.includes('Use password')
+      el.textContent.includes('使用密碼') || el.textContent.includes('use password')
     );
-    if (btn) { btn.click(); return true; }
-    return false;
-  }).then(clicked => {
-    if (clicked) console.log("已点击 '使用密碼登入'");
+    if (btn) btn.click();
   }).catch(() => {});
-  await delayClick(2000);
+  await delayClick(3000);
 
   // 等待密码输入框
-  const passwordInput = await page.waitForSelector('#login-account-password', { timeout: 15000 }).catch(() => null);
-  if (!passwordInput) {
-    console.log("密码输入框仍未出现，重试点击...");
-    await page.evaluate(() => {
-      const btn = Array.from(document.querySelectorAll('button, a, .btn')).find(el =>
-        el.textContent.includes('使用密碼') || el.textContent.includes('password')
-      );
-      if (btn) btn.click();
-    }).catch(() => {});
-    await delayClick(3000);
-    await page.waitForSelector('#login-account-password', { timeout: 15000 });
+  const pwInput = await page.waitForSelector('#login-account-password', { timeout: 15000 }).catch(() => null);
+  if (!pwInput) {
+    console.log("密码输入框未出现，UI 登录也失败");
+    return;
   }
 
   await page.click('#login-account-password', { clickCount: 3 });
@@ -786,33 +802,21 @@ async function login(page, username, password, retryCount = 3) {
   await delayClick(1000);
 
   // 点击登录按钮
-  await page.waitForSelector('#login-button');
-  await delayClick(1000);
   await page.click('#login-button');
+  await delayClick(1000);
   try {
     await Promise.all([
       page.waitForNavigation({ waitUntil: 'domcontentloaded' }),
       page.click('#login-button', { force: true }),
     ]);
   } catch (error) {
-    const alertError = await page.$('.alert.alert-error');
-    if (alertError) {
-      const alertText = await page.evaluate(el => el.innerText, alertError);
-      if (alertText.includes('incorrect') || alertText.includes('Incorrect') || alertText.includes('不正确')) {
-        throw new Error(`密码错误，失败用户 ${maskUsername(username)}`);
-      } else {
-        throw new Error(`登录错误 ${maskUsername(username)}: ${alertText}`);
-      }
-    } else {
-      if (retryCount > 0) {
-        console.log("Retrying login...");
-        await page.reload({ waitUntil: 'domcontentloaded', timeout: parseInt(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT || "120000", 10) });
-        await delayClick(2000);
-        return await login(page, username, password, retryCount - 1);
-      } else {
-        throw new Error(`登录超时 ${maskUsername(username)}: ${error.message}`);
-      }
+    if (retryCount > 0) {
+      console.log("Retrying login...");
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+      await delayClick(2000);
+      return await login(page, username, password, retryCount - 1);
     }
+    throw new Error(`登录超时 ${maskUsername(username)}: ${error.message}`);
   }
 }
 
