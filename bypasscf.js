@@ -776,8 +776,67 @@ async function login(page, username, password, retryCount = 3) {
   console.log("使用登录表单:", useAlt ? 'signin (首页)' : 'login (模态框)');
 
   if (useAlt) {
-    // 首页 signin 表单：用 Discourse session API 登入
-    console.log("使用 Discourse session API 登入...");
+    // 首页：用 Ember.js 内部方法打开登录模态框
+    console.log("尝试通过 Ember 打开登录模态框...");
+    const modalOpened = await page.evaluate(() => {
+      // 方法 1: 点击 header 登录按钮
+      const btn = document.querySelector('.header-buttons .login-button, .login-button.btn');
+      if (btn) { btn.click(); return 'button'; }
+      // 方法 2: Ember application route
+      try {
+        const app = window.Discourse || window.App;
+        if (app && app.__container__) {
+          const router = app.__container__.lookup('router:main');
+          if (router) { router.transitionTo('login'); return 'ember-route'; }
+        }
+      } catch {}
+      // 方法 3: jQuery trigger
+      try {
+        if (window.$ || window.jQuery) {
+          (window.$ || window.jQuery)('.login-button').first().click();
+          return 'jquery';
+        }
+      } catch {}
+      return null;
+    });
+    console.log("模态框触发方式:", modalOpened);
+    await delayClick(3000);
+
+    // 检查模态框是否打开
+    const hasModal = await page.$('#login-account-name');
+    if (hasModal) {
+      console.log("模态框已打开，填写表单...");
+      await page.click('#login-account-name', { clickCount: 3 });
+      await page.type('#login-account-name', username, { delay: 100 });
+      await delayClick(1000);
+      // 点击 "使用密碼登入"
+      await page.evaluate(() => {
+        const btn = Array.from(document.querySelectorAll('button, a, .btn')).find(el =>
+          el.textContent.includes('使用密碼') || el.textContent.includes('use password')
+        );
+        if (btn) btn.click();
+      }).catch(() => {});
+      await delayClick(2000);
+      const pwInput = await page.waitForSelector('#login-account-password', { timeout: 10000 }).catch(() => null);
+      if (pwInput) {
+        await pwInput.focus();
+        await page.keyboard.type(password, { delay: 100 });
+        await delayClick(1000);
+        await page.click('#login-button');
+        await delayClick(1000);
+        try {
+          await Promise.all([
+            page.waitForNavigation({ waitUntil: 'domcontentloaded' }),
+            page.click('#login-button', { force: true }),
+          ]);
+        } catch {}
+        await delayClick(2000);
+        return;
+      }
+    }
+
+    // 模态框打不开或密码框找不到，尝试 API
+    console.log("模态框失败，尝试 Discourse session API...");
     const apiResult = await page.evaluate(async (user, pass) => {
       try {
         const csrfResp = await fetch('/session/csrf.json', { credentials: 'same-origin' });
@@ -793,10 +852,10 @@ async function login(page, username, password, retryCount = 3) {
           body: `login=${encodeURIComponent(user)}&password=${encodeURIComponent(pass)}`,
         });
         const data = await resp.json();
-        return { status: resp.status, ok: resp.ok, error: data.error, message: data.message };
+        return { status: resp.status, ok: resp.ok, error: data.error };
       } catch (e) { return { error: e.message }; }
     }, username, password);
-    console.log("API 登入结果:", JSON.stringify(apiResult));
+    console.log("API 结果:", JSON.stringify(apiResult));
     if (apiResult.ok) {
       await page.reload({ waitUntil: 'domcontentloaded' });
       await waitForCf(page, null);
