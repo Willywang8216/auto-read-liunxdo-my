@@ -335,14 +335,11 @@ async function launchBrowserForUser(username, password, cookie = null) {
   let browser = null; // 在 try 之外声明 browser 变量
   try {
     console.log("当前用户:", maskUsername(username));
-    const profileDir = path.join(process.env.TEMP || process.env.TMP || "/tmp", "linuxdo-browser-profile", username);
-    if (!fs.existsSync(profileDir)) fs.mkdirSync(profileDir, { recursive: true });
     const browserOptions = {
       headless: "auto",
       args: ["--no-sandbox", "--disable-setuid-sandbox"], // Linux 需要的安全设置
       customConfig: {
         chromePath: "C:\\Users\\willy\\AppData\\Local\\ms-playwright\\chromium-1223\\chrome-win64\\chrome.exe",
-        userDataDir: profileDir,
       },
       connectOption: {
         protocolTimeout: 120000,
@@ -500,6 +497,9 @@ async function launchBrowserForUser(username, password, cookie = null) {
     if ((authButtons || !avatarImg) && cookieLoginAttempted && password) {
       console.log("Cookie 已过期，自动退回密码登录...");
       cookieLoginFailed = true;
+      // 先导航到干净的页面，清除 "you were logged out" 弹窗状态
+      await page.goto(loginUrl + "/t/topic/1", { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+      await waitForCf(page, browser);
       await login(page, username, password);
       avatarImg = await page.$("img.avatar");
       authButtons = await page.$("span.auth-buttons");
