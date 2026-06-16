@@ -487,13 +487,9 @@ async function launchBrowserForUser(username, password, cookie = null) {
         await waitForCf(page, browser);
       }
       await delayClick(2000);
-    } else if (cookie && hasT && !hasForumSession) {
-      // 有 _t 但没有 _forum_session，直接走密码登入
-      console.log("Cookie 不完整（只有 _t，缺少 _forum_session），直接密码登录...");
-      // 不额外导航，直接在当前页面登入（避免触发新 CF）
-      await login(page, username, password);
     } else {
-      console.log("登录操作");
+      // Cookie 不完整或没有，直接走 login()
+      console.log("Cookie 不完整或没有，尝试密码登录...");
       await login(page, username, password);
     }
     // 查找具有类名 "avatar" 的 img 元素验证登录是否成功
@@ -510,15 +506,28 @@ async function launchBrowserForUser(username, password, cookie = null) {
       authButtons = await page.$("span.auth-buttons");
     }
 
-    // 如果登录还是失败，再试一次导航到 /login
+    // 如果登录还是失败，等待用户手动登入
     if ((authButtons || !avatarImg) && password) {
-      console.log("登录未成功，导航到 /login 页面重试...");
-      await page.goto(loginUrl + "/login", { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
-      await waitForCf(page, browser);
-      await delayClick(2000);
-      await login(page, username, password);
-      avatarImg = await page.$("img.avatar");
-      authButtons = await page.$("span.auth-buttons");
+      const manualMsg = `⚠️ ${maskUsername(username)} 需要手动登入！请在 Chromium 窗口中登入，脚本会等待 120 秒。`;
+      console.log(manualMsg);
+      sendToTelegram(manualMsg);
+      sendToTelegramGroup(manualMsg);
+      // 等待用户手动登入（检查 avatarImg）
+      const waitStart = Date.now();
+      while (Date.now() - waitStart < 120000) {
+        await delayClick(5000);
+        // 关闭弹窗
+        await page.evaluate(() => {
+          document.querySelectorAll('.dialog-footer .btn-primary').forEach(b => b.click());
+        }).catch(() => {});
+        avatarImg = await page.$("img.avatar");
+        authButtons = await page.$("span.auth-buttons");
+        if (avatarImg && !authButtons) {
+          console.log("检测到手动登入成功！");
+          sendToTelegram(`✅ ${maskUsername(username)} 手动登入成功`);
+          break;
+        }
+      }
     }
 
     if (authButtons) {
@@ -533,18 +542,21 @@ async function launchBrowserForUser(username, password, cookie = null) {
 
     //真正执行阅读脚本
 
-    // 关闭 "You were logged out" 弹窗（可能在登入后出现）
-    await page.evaluate(() => {
-      const refreshBtn = document.querySelector('.dialog-footer .btn-primary');
-      if (refreshBtn && refreshBtn.textContent.includes('Refresh')) {
-        refreshBtn.click();
-        return true;
-      }
-      return false;
-    }).then(clicked => {
-      if (clicked) console.log("关闭了 'You were logged out' 弹窗，刷新页面...");
-    }).catch(() => {});
-    await delayClick(3000);
+    // 循环关闭 "You were logged out" 弹窗（可能反复出现）
+    for (let i = 0; i < 5; i++) {
+      const dismissed = await page.evaluate(() => {
+        const btn = document.querySelector('.dialog-footer .btn-primary');
+        if (btn && document.querySelector('.dialog-body')) {
+          btn.click();
+          return true;
+        }
+        return false;
+      }).catch(() => false);
+      if (!dismissed) break;
+      console.log(`关闭弹窗 #${i + 1}...`);
+      await delayClick(2000);
+    }
+    await delayClick(2000);
 
     let externalScriptPath;
     if (isLikeSpecificUser === "true") {
@@ -591,7 +603,7 @@ async function launchBrowserForUser(username, password, cookie = null) {
     });
     // 如果是Linuxdo，就导航到我的帖子，但我感觉这里写没什么用，因为外部脚本已经定义好了，不对，这里不会点击按钮，所以不会跳转，需要手动跳转
     if (loginUrl == "https://linux.do") {
-      await page.goto("https://linux.do/t/topic/13716/790", {
+      await page.goto("https://linux.do/latest", {
         waitUntil: "domcontentloaded",
         timeout: parseInt(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT || "120000", 10),
       });
@@ -748,193 +760,27 @@ async function login(page, username, password, retryCount = 3) {
   await waitForCf(page, null);
   await delayClick(1000);
 
-  // 直接导航到 /login 页面（已验证 selectors 都正常）
-  const currentUrl = page.url();
-  if (!currentUrl.includes('/login')) {
-    console.log("导航到 /login 页面...");
-    await page.goto(loginUrl + "/login", { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
-    await waitForCf(page, null);
-    await delayClick(3000);
-  }
+  // 关闭弹窗
+  await page.evaluate(() => {
+    document.querySelectorAll('.dialog-footer .btn-primary').forEach(b => b.click());
+  }).catch(() => {});
+  await delayClick(2000);
+
+  // 尝试打开登录模态框
+  await page.evaluate(() => {
+    const btn = document.querySelector('.header-buttons .login-button, .login-button.btn');
+    if (btn) btn.click();
+  }).catch(() => {});
+  await delayClick(3000);
 
   // 等待用户名输入框
-  const nameInput = await page.waitForSelector('#login-account-name', { timeout: 15000 }).catch(() => null);
+  const nameInput = await page.waitForSelector('#login-account-name', { timeout: 10000 }).catch(() => null);
   if (!nameInput) {
-    console.log("登录页面未加载，尝试 API 登录...");
-    const apiResult = await page.evaluate(async (user, pass) => {
-      try {
-        const csrfResp = await fetch('/session/csrf.json', { credentials: 'same-origin' });
-        const csrfData = await csrfResp.json();
-        const resp = await fetch('/session', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRF-Token': csrfData.csrf, 'X-Requested-With': 'XMLHttpRequest' },
-          credentials: 'same-origin',
-          body: `login=${encodeURIComponent(user)}&password=${encodeURIComponent(pass)}`,
-        });
-        const data = await resp.json();
-        return { status: resp.status, ok: resp.ok, error: data.error };
-      } catch (e) { return { error: e.message }; }
-    }, username, password);
-    console.log("API 登录结果:", JSON.stringify(apiResult));
-    if (apiResult.ok) {
-      await page.reload({ waitUntil: 'domcontentloaded' });
-      await waitForCf(page, null);
-      return;
-    }
-    if (retryCount > 0) return await login(page, username, password, retryCount - 1);
+    console.log("登录模态框未打开，跳过自动登录");
     return;
   }
 
-  // 输入用户名
-  await page.click('#login-account-name', { clickCount: 3 });
-  await page.type('#login-account-name', username, { delay: 100 });
-  await delayClick(1000);
-
-  // 确定使用哪套 selector（首页用 signin_*，/login 页面用 login-account-*）
-  const useAlt = await page.$('#signin_username');
-  const nameSelector = useAlt ? '#signin_username' : '#login-account-name';
-  const pwSelector = useAlt ? '#signin_password' : '#login-account-password';
-  const btnSelector = useAlt ? '#signin-button' : '#login-button';
-  console.log("使用登录表单:", useAlt ? 'signin (首页)' : 'login (模态框)');
-
-  if (useAlt) {
-    // 首页：用 Ember.js 内部方法打开登录模态框
-    console.log("尝试通过 Ember 打开登录模态框...");
-    const modalOpened = await page.evaluate(() => {
-      const btn = document.querySelector('.header-buttons .login-button, .login-button.btn');
-      if (btn) { btn.click(); return 'button'; }
-      try {
-        const app = window.Discourse || window.App;
-        if (app && app.__container__) {
-          const router = app.__container__.lookup('router:main');
-          if (router) { router.transitionTo('login'); return 'ember-route'; }
-        }
-      } catch {}
-      try {
-        if (window.$ || window.jQuery) {
-          (window.$ || window.jQuery)('.login-button').first().click();
-          return 'jquery';
-        }
-      } catch {}
-      return null;
-    });
-    console.log("模态框触发方式:", modalOpened);
-    await delayClick(3000);
-
-    // 检查模态框内容
-    const modalDebug = await page.evaluate(() => {
-      const nameInput = document.querySelector('#login-account-name');
-      const pwInput = document.querySelector('#login-account-password');
-      const pwLink = Array.from(document.querySelectorAll('button, a, .btn')).find(el =>
-        el.textContent.includes('使用密碼') || el.textContent.includes('use password')
-      );
-      const allButtons = Array.from(document.querySelectorAll('.modal-body button, .modal-body a, .login-modal button, .login-modal a')).map(el => el.textContent.trim().substring(0, 30));
-      return {
-        hasName: !!nameInput, hasPw: !!pwInput, hasPwLink: !!pwLink,
-        pwLinkText: pwLink ? pwLink.textContent.trim() : null,
-        buttons: allButtons.slice(0, 10),
-      };
-    }).catch(() => ({}));
-    console.log("模态框内容:", JSON.stringify(modalDebug));
-
-    if (modalDebug.hasName && modalDebug.hasPw) {
-      // 两个字段都在！通过 Ember 控制器设置值（DOM 值 Ember 不读取）
-      console.log("两个字段都存在，通过 Ember 设置值...");
-      const loginResult = await page.evaluate(async (user, pass) => {
-        try {
-          // 方法 1: 通过 Ember container 获取 LoginController 并设置属性
-          const app = window.Discourse || window.App;
-          if (app && app.__container__) {
-            const controller = app.__container__.lookup('controller:login');
-            if (controller) {
-              controller.set('loginName', user);
-              controller.set('loginPassword', pass);
-              // 不调用 authenticate，设值后点按钮让 Ember 处理
-              return { method: 'ember-set', ok: true };
-            }
-          }
-          // 方法 2: 用 nativeInputValueSetter 触发 Ember 绑定
-          const nameInput = document.querySelector('#login-account-name');
-          const pwInput = document.querySelector('#login-account-password');
-          if (nameInput && pwInput) {
-            const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-            nativeSetter.call(nameInput, user);
-            nameInput.dispatchEvent(new Event('input', { bubbles: true }));
-            nameInput.dispatchEvent(new Event('change', { bubbles: true }));
-            nativeSetter.call(pwInput, pass);
-            pwInput.dispatchEvent(new Event('input', { bubbles: true }));
-            pwInput.dispatchEvent(new Event('change', { bubbles: true }));
-            // 点击登录按钮
-            const btn = document.querySelector('#login-button');
-            if (btn) btn.click();
-            return { method: 'native-setter', ok: true };
-          }
-          return { error: 'no inputs found' };
-        } catch (e) { return { error: e.message }; }
-      }, username, password);
-      console.log("登入方式:", JSON.stringify(loginResult));
-      // 设值后点登录按钮让 Ember 处理
-      await page.evaluate(() => {
-        const btn = document.querySelector('#login-button');
-        if (btn) btn.click();
-      }).catch(() => {});
-      await delayClick(1000);
-      // 再点一次 force
-      await page.evaluate(() => {
-        const btn = document.querySelector('#login-button');
-        if (btn) btn.click();
-      }).catch(() => {});
-      try {
-        await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 });
-      } catch {}
-      await delayClick(2000);
-      return;
-    }
-
-    // 模态框内容不符合预期，尝试 XMLHttpRequest API
-    console.log("模态框字段不完整，尝试 XMLHttpRequest API...");
-    const apiResult = await page.evaluate(async (user, pass) => {
-      return new Promise((resolve) => {
-        try {
-          // 先获取 CSRF
-          const csrfXhr = new XMLHttpRequest();
-          csrfXhr.open('GET', '/session/csrf.json', true);
-          csrfXhr.withCredentials = true;
-          csrfXhr.onload = function() {
-            try {
-              const csrfData = JSON.parse(csrfXhr.responseText);
-              // 用 XMLHttpRequest 发送登录请求
-              const xhr = new XMLHttpRequest();
-              xhr.open('POST', '/session', true);
-              xhr.withCredentials = true;
-              xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
-              xhr.setRequestHeader('X-CSRF-Token', csrfData.csrf);
-              xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
-              xhr.onload = function() {
-                try {
-                  const data = JSON.parse(xhr.responseText);
-                  resolve({ status: xhr.status, ok: xhr.status === 200, error: data.error });
-                } catch(e) { resolve({ status: xhr.status, error: 'parse error', text: xhr.responseText.substring(0, 100) }); }
-              };
-              xhr.onerror = function() { resolve({ error: 'network error' }); };
-              xhr.send(`login=${encodeURIComponent(user)}&password=${encodeURIComponent(pass)}`);
-            } catch(e) { resolve({ error: 'csrf error: ' + e.message }); }
-          };
-          csrfXhr.onerror = function() { resolve({ error: 'csrf network error' }); };
-          csrfXhr.send();
-        } catch(e) { resolve({ error: e.message }); }
-      });
-    }, username, password);
-    console.log("API 结果:", JSON.stringify(apiResult));
-    if (apiResult.ok) {
-      await page.reload({ waitUntil: 'domcontentloaded' });
-      await waitForCf(page, null);
-      await delayClick(2000);
-    }
-    return;
-  }
-
-  // /login 模态框：需要先点击 "使用密碼登入"
+  // 点击 "使用密碼登入"
   await page.evaluate(() => {
     const btn = Array.from(document.querySelectorAll('button, a, .btn')).find(el =>
       el.textContent.includes('使用密碼') || el.textContent.includes('use password')
@@ -943,41 +789,29 @@ async function login(page, username, password, retryCount = 3) {
   }).catch(() => {});
   await delayClick(2000);
 
+  // 输入用户名
+  await page.click('#login-account-name', { clickCount: 3 });
+  await page.type('#login-account-name', username, { delay: 100 });
+  await delayClick(1000);
+
   // 等待密码输入框
-  const pwInput = await page.waitForSelector(pwSelector, { timeout: 10000 }).catch(() => null);
+  const pwInput = await page.waitForSelector('#login-account-password', { timeout: 10000 }).catch(() => null);
   if (!pwInput) {
-    console.log("密码输入框未出现，selector:", pwSelector);
-    if (retryCount > 0) return await login(page, username, password, retryCount - 1);
+    console.log("密码输入框未出现，跳过自动登录");
     return;
   }
 
-  // 输入用户名
-  await page.click(nameSelector, { clickCount: 3 });
-  await page.type(nameSelector, username, { delay: 100 });
-  await delayClick(1000);
-
-  // 输入密码（用 keyboard.type 避免元素被移除后 selector 失效）
+  // 输入密码
   await pwInput.focus();
   await page.keyboard.type(password, { delay: 100 });
   await delayClick(1000);
 
   // 点击登录
-  await page.click(btnSelector);
-  await delayClick(1000);
+  await page.click('#login-button');
+  await delayClick(2000);
   try {
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: 'domcontentloaded' }),
-      page.click(btnSelector, { force: true }),
-    ]);
-  } catch (error) {
-    if (retryCount > 0) {
-      console.log("Retrying login...");
-      await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-      await delayClick(2000);
-      return await login(page, username, password, retryCount - 1);
-    }
-    throw new Error(`登录超时 ${maskUsername(username)}: ${error.message}`);
-  }
+    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 });
+  } catch {}
 }
 
 async function navigatePage(url, page, browser) {
