@@ -754,18 +754,31 @@ async function login(page, username, password, retryCount = 3) {
   await page.type('#login-account-name', username, { delay: 100 });
   await delayClick(1000);
 
+  // 点击 "使用密碼登入" 切换到密码表单（Discourse 默认显示社交登录）
+  await delayClick(1000);
+  await page.evaluate(() => {
+    const btn = Array.from(document.querySelectorAll('button, a, .btn')).find(el =>
+      el.textContent.includes('使用密碼') || el.textContent.includes('use password') || el.textContent.includes('Use password')
+    );
+    if (btn) { btn.click(); return true; }
+    return false;
+  }).then(clicked => {
+    if (clicked) console.log("已点击 '使用密碼登入'");
+  }).catch(() => {});
+  await delayClick(2000);
+
   // 等待密码输入框
-  const passwordInput = await page.waitForSelector('#login-account-password', { timeout: 10000 }).catch(() => null);
+  const passwordInput = await page.waitForSelector('#login-account-password', { timeout: 15000 }).catch(() => null);
   if (!passwordInput) {
-    console.log("密码输入框未出现，可能需要点击 '使用密碼登入'");
+    console.log("密码输入框仍未出现，重试点击...");
     await page.evaluate(() => {
-      const btn = Array.from(document.querySelectorAll('button, a')).find(el =>
-        el.textContent.includes('使用密碼') || el.textContent.includes('use password')
+      const btn = Array.from(document.querySelectorAll('button, a, .btn')).find(el =>
+        el.textContent.includes('使用密碼') || el.textContent.includes('password')
       );
       if (btn) btn.click();
     }).catch(() => {});
-    await delayClick(2000);
-    await page.waitForSelector('#login-account-password', { timeout: 10000 });
+    await delayClick(3000);
+    await page.waitForSelector('#login-account-password', { timeout: 15000 });
   }
 
   await page.click('#login-account-password', { clickCount: 3 });
