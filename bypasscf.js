@@ -497,10 +497,21 @@ async function launchBrowserForUser(username, password, cookie = null) {
     let avatarImg = await page.$("img.avatar").catch(() => null);
     let authButtons = await page.$("span.auth-buttons").catch(() => null);
 
-    // Cookie 登录失败且有密码时，自动退回密码登录
+    // Cookie 登录失败且有密码时，先清除过期 _t cookie，再退回密码登录
     if ((authButtons || !avatarImg) && cookieLoginAttempted && password) {
-      console.log("Cookie 已过期，自动退回密码登录...");
+      console.log("Cookie 已过期，清除过期 _t cookie...");
       cookieLoginFailed = true;
+      // 关键：删除过期的 _t cookie，否则 "You were logged out" 弹窗会无限循环
+      try {
+        const clearClient = await page.createCDPSession();
+        await clearClient.send('Network.deleteCookies', { name: '_t', domain: '.linux.do' });
+        await clearClient.send('Network.deleteCookies', { name: '_t', domain: 'linux.do' });
+        console.log("已清除过期 _t cookie");
+      } catch {}
+      // 导航到干净的页面（没有过期 cookie，不会弹窗）
+      await page.goto(loginUrl, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+      await waitForCf(page, browser);
+      await delayClick(2000);
       await login(page, username, password);
       avatarImg = await page.$("img.avatar").catch(() => null);
       authButtons = await page.$("span.auth-buttons").catch(() => null);
@@ -512,6 +523,15 @@ async function launchBrowserForUser(username, password, cookie = null) {
       console.log(manualMsg);
       sendToTelegram(manualMsg);
       sendToTelegramGroup(manualMsg);
+      // 清除过期 cookie 防止弹窗循环
+      try {
+        const clearClient = await page.createCDPSession();
+        await clearClient.send('Network.deleteCookies', { name: '_t', domain: '.linux.do' });
+        await clearClient.send('Network.deleteCookies', { name: '_t', domain: 'linux.do' });
+      } catch {}
+      await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+      await waitForCf(page, browser);
+      await delayClick(2000);
       // 等待用户手动登入（检查 avatarImg）
       const waitStart = Date.now();
       while (Date.now() - waitStart < 120000) {
@@ -546,7 +566,13 @@ async function launchBrowserForUser(username, password, cookie = null) {
     for (let i = 0; i < 3; i++) {
       const hasDialog = await page.$('.dialog-body').catch(() => null);
       if (!hasDialog) break;
-      console.log(`检测到弹窗，导航到首页打破循环...`);
+      console.log(`检测到弹窗，清除 cookie 并导航到首页...`);
+      // 清除过期 cookie 打破循环
+      try {
+        const c = await page.createCDPSession();
+        await c.send('Network.deleteCookies', { name: '_t', domain: '.linux.do' });
+        await c.send('Network.deleteCookies', { name: '_t', domain: 'linux.do' });
+      } catch {}
       await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
       await waitForCf(page, browser);
       await delayClick(3000);
