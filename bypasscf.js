@@ -805,7 +805,16 @@ async function login(page, username, password, retryCount = 3) {
   }).catch(() => {});
   await delayClick(2000);
 
-  // 方法: 使用隐藏的 #hidden-login-form（标准 HTML 表单，不依赖 Ember）
+  // 先导航到 /login 页面（确保 hidden-login-form 存在）
+  const currentUrl = page.url();
+  if (!currentUrl.includes('/login')) {
+    console.log("导航到 /login 页面...");
+    await page.goto(loginUrl + "/login", { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+    await waitForCf(page, null);
+    await delayClick(2000);
+  }
+
+  // 使用隐藏的 #hidden-login-form（标准 HTML 表单，不依赖 Ember）
   console.log("使用 hidden-login-form 登入...");
   const loginResult = await page.evaluate((user, pass) => {
     const form = document.querySelector('#hidden-login-form');
@@ -818,25 +827,6 @@ async function login(page, username, password, retryCount = 3) {
     return { submitted: true, action: form.action };
   }, username, password);
   console.log("登入结果:", JSON.stringify(loginResult));
-
-  if (loginResult.error) {
-    // Fallback: navigate to /login page first to get the form
-    console.log("表单未找到，导航到 /login...");
-    await page.goto(loginUrl + "/login", { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
-    await waitForCf(page, null);
-    await delayClick(2000);
-    const retryResult = await page.evaluate((user, pass) => {
-      const form = document.querySelector('#hidden-login-form');
-      if (!form) return { error: 'still not found' };
-      const u = form.querySelector('#signin_username');
-      const p = form.querySelector('#signin_password');
-      if (u) u.value = user;
-      if (p) p.value = pass;
-      form.submit();
-      return { submitted: true };
-    }, username, password);
-    console.log("重试结果:", JSON.stringify(retryResult));
-  }
 
   try {
     await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 });
