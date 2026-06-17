@@ -83,7 +83,7 @@ const passwords = process.env.PASSWORDS ? process.env.PASSWORDS.split(",") : [];
 // 读取每个账号对应的Cookie（逗号分隔，与USERNAMES一一对应），有Cookie则跳过表单登录
 const cookiesEnv = process.env.COOKIES ? process.env.COOKIES.split(",") : [];
 const loginUrl = process.env.WEBSITE || "https://linux.do"; //在GitHub action环境里它不能读取默认环境变量,只能在这里设置默认值
-const delayBetweenInstances = 10000;
+const delayBetweenInstances = 20000; // 20秒间隔避免限流
 const totalAccounts = usernames.length; // 总的账号数
 const delayBetweenBatches =
   runTimeLimitMillis / Math.ceil(totalAccounts / maxConcurrentAccounts);
@@ -444,10 +444,9 @@ async function launchBrowserForUser(username, password, cookie = null) {
     const domain = new URL(loginUrl).hostname;
     const cookieObjects = cookie ? parseCookieString(cookie, domain) : [];
     const hasT = cookieObjects.some(c => c.name === '_t');
-    const hasForumSession = cookieObjects.some(c => c.name === '_forum_session');
-    // 只有同时有 _t 和 _forum_session 才尝试 cookie 登入
-    if (cookie && hasT && hasForumSession) {
-      console.log("检测到Cookie (_t + _forum_session)，尝试Cookie登录");
+    // 只要有 _t 就尝试 cookie 登入（_forum_session 跨实例不可用，不依赖它）
+    if (cookie && hasT) {
+      console.log("检测到 _t cookie，尝试Cookie登录");
       cookieLoginAttempted = true;
       // 保存 _t cookie 值用于 CF 后重新设置
       const tObj = cookieObjects.find(c => c.name === '_t');
@@ -455,19 +454,20 @@ async function launchBrowserForUser(username, password, cookie = null) {
       // 导航到域名，先通过 CF challenge
       await page.goto(loginUrl, { waitUntil: "domcontentloaded", timeout: parseInt(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT || "120000", 10) }).catch(() => {});
       await waitForCf(page, browser);
-      // CF 通过后，用 CDP 设置 cookie
+      // CF 通过后，用 CDP 只设置 _t cookie（_forum_session 跨实例不可用）
       const client = await page.createCDPSession();
-      for (const c of cookieObjects) {
+      const tCookieObj = cookieObjects.find(c => c.name === '_t');
+      if (tCookieObj) {
         await client.send('Network.setCookie', {
-          name: c.name,
-          value: c.value,
+          name: '_t',
+          value: tCookieObj.value,
           domain: '.' + domain,
           path: '/',
           secure: true,
           httpOnly: true,
         });
       }
-      console.log(`已设置 ${cookieObjects.length} 个Cookie (CDP)`);
+      console.log(`已设置 _t cookie (CDP)`);
       // 验证 cookie 设置成功
       const { cookies: verifyCookies } = await client.send('Network.getAllCookies');
       const tCookieVerify = verifyCookies.find(c => c.name === '_t' && c.domain.includes(domain));
@@ -543,18 +543,13 @@ async function launchBrowserForUser(username, password, cookie = null) {
     //真正执行阅读脚本
 
     // 循环关闭 "You were logged out" 弹窗（可能反复出现）
-    for (let i = 0; i < 5; i++) {
-      const dismissed = await page.evaluate(() => {
-        const btn = document.querySelector('.dialog-footer .btn-primary');
-        if (btn && document.querySelector('.dialog-body')) {
-          btn.click();
-          return true;
-        }
-        return false;
-      }).catch(() => false);
-      if (!dismissed) break;
-      console.log(`关闭弹窗 #${i + 1}...`);
-      await delayClick(2000);
+    for (let i = 0; i < 3; i++) {
+      const hasDialog = await page.$('.dialog-body').catch(() => null);
+      if (!hasDialog) break;
+      console.log(`检测到弹窗，导航到首页打破循环...`);
+      await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+      await waitForCf(page, browser);
+      await delayClick(3000);
     }
     await delayClick(2000);
 
@@ -722,9 +717,8 @@ async function launchBrowserForUser(username, password, cookie = null) {
       console.warn("阅读状态检查失败:", e.message);
     }
 
-    // 登录成功后自动更新 cookie 到 .env（保存 _t + _forum_session 供下次使用）
+    // 登录成功后自动更新 _t cookie（唯一能跨浏览器实例复用的 cookie）
     try {
-      // 用 CDP 读取所有 cookie（包括 httpOnly 的 _forum_session）
       const cdpClient = await page.createCDPSession().catch(() => null);
       let browserCookies = [];
       if (cdpClient) {
@@ -733,14 +727,12 @@ async function launchBrowserForUser(username, password, cookie = null) {
       } else {
         browserCookies = await page.cookies(loginUrl);
       }
-      const cookieNames = ["_t", "_forum_session"];
-      const cookieList = cookieNames
-        .map(name => browserCookies.find(c => c.name === name))
-        .filter(Boolean)
-        .map(c => `${c.name}=${c.value}`);
-      if (cookieList.length > 0) {
-        updateCookieInEnv(username, cookieList);
-        console.log(`Cookie 已自动更新: ${username} (${cookieList.length} cookies: ${cookieList.map(c => c.split('=')[0]).join(', ')})`);
+      const tCookie = browserCookies.find(c => c.name === '_t');
+      if (tCookie) {
+        updateCookieInEnv(username, [`_t=${tCookie.value}`]);
+        console.log(`Cookie 已自动更新: ${username} (_t)`);
+      } else {
+        console.log(`警告: 登录成功但未找到 _t cookie`);
       }
     } catch (e) {
       console.warn("Cookie 自动更新失败:", e.message);
