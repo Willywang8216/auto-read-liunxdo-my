@@ -805,68 +805,43 @@ async function login(page, username, password, retryCount = 3) {
   }).catch(() => {});
   await delayClick(2000);
 
-  // 尝试打开登录模态框
-  await page.evaluate(() => {
-    const btn = document.querySelector('.header-buttons .login-button, .login-button.btn');
-    if (btn) btn.click();
-  }).catch(() => {});
-  await delayClick(3000);
-
-  // 等待用户名输入框
-  const nameInput = await page.waitForSelector('#login-account-name', { timeout: 10000 }).catch(() => null);
-  if (!nameInput) {
-    console.log("登录模态框未打开，跳过自动登录");
-    return;
-  }
-
-  // 点击 "使用密碼登入"
-  await page.evaluate(() => {
-    const btn = Array.from(document.querySelectorAll('button, a, .btn')).find(el =>
-      el.textContent.includes('使用密碼') || el.textContent.includes('use password')
-    );
-    if (btn) btn.click();
-  }).catch(() => {});
-  await delayClick(2000);
-
-  // 等待密码输入框
-  const pwInput = await page.waitForSelector('#login-account-password', { timeout: 10000 }).catch(() => null);
-  if (!pwInput) {
-    console.log("密码输入框未出现，跳过自动登录");
-    return;
-  }
-
-  // 用 nativeInputValueSetter 填写表单（确保 Ember.js 数据绑定触发）
-  console.log("填写登录表单...");
-  await page.evaluate((user, pass) => {
-    const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-    const nameEl = document.querySelector('#login-account-name');
-    const pwEl = document.querySelector('#login-account-password');
-    if (nameEl) {
-      nameEl.focus();
-      nativeSetter.call(nameEl, user);
-      nameEl.dispatchEvent(new Event('input', { bubbles: true }));
-      nameEl.dispatchEvent(new Event('change', { bubbles: true }));
-      nameEl.dispatchEvent(new Event('blur', { bubbles: true }));
-    }
-    if (pwEl) {
-      pwEl.focus();
-      nativeSetter.call(pwEl, pass);
-      pwEl.dispatchEvent(new Event('input', { bubbles: true }));
-      pwEl.dispatchEvent(new Event('change', { bubbles: true }));
-      pwEl.dispatchEvent(new Event('blur', { bubbles: true }));
-    }
+  // 方法: 使用隐藏的 #hidden-login-form（标准 HTML 表单，不依赖 Ember）
+  console.log("使用 hidden-login-form 登入...");
+  const loginResult = await page.evaluate((user, pass) => {
+    const form = document.querySelector('#hidden-login-form');
+    if (!form) return { error: 'hidden-login-form not found' };
+    const usernameInput = form.querySelector('#signin_username');
+    const passwordInput = form.querySelector('#signin_password');
+    if (usernameInput) usernameInput.value = user;
+    if (passwordInput) passwordInput.value = pass;
+    form.submit();
+    return { submitted: true, action: form.action };
   }, username, password);
-  await delayClick(1000);
+  console.log("登入结果:", JSON.stringify(loginResult));
 
-  // 提交表单
-  await page.evaluate(() => {
-    const btn = document.querySelector('#login-button');
-    if (btn) btn.click();
-  });
-  await delayClick(3000);
+  if (loginResult.error) {
+    // Fallback: navigate to /login page first to get the form
+    console.log("表单未找到，导航到 /login...");
+    await page.goto(loginUrl + "/login", { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+    await waitForCf(page, null);
+    await delayClick(2000);
+    const retryResult = await page.evaluate((user, pass) => {
+      const form = document.querySelector('#hidden-login-form');
+      if (!form) return { error: 'still not found' };
+      const u = form.querySelector('#signin_username');
+      const p = form.querySelector('#signin_password');
+      if (u) u.value = user;
+      if (p) p.value = pass;
+      form.submit();
+      return { submitted: true };
+    }, username, password);
+    console.log("重试结果:", JSON.stringify(retryResult));
+  }
+
   try {
     await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 });
   } catch {}
+  await delayClick(2000);
 }
 
 async function navigatePage(url, page, browser) {
