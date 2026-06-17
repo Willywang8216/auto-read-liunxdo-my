@@ -828,11 +828,6 @@ async function login(page, username, password, retryCount = 3) {
   }).catch(() => {});
   await delayClick(2000);
 
-  // 输入用户名
-  await page.click('#login-account-name', { clickCount: 3 });
-  await page.type('#login-account-name', username, { delay: 100 });
-  await delayClick(1000);
-
   // 等待密码输入框
   const pwInput = await page.waitForSelector('#login-account-password', { timeout: 10000 }).catch(() => null);
   if (!pwInput) {
@@ -840,14 +835,35 @@ async function login(page, username, password, retryCount = 3) {
     return;
   }
 
-  // 输入密码
-  await pwInput.focus();
-  await page.keyboard.type(password, { delay: 100 });
+  // 用 nativeInputValueSetter 填写表单（确保 Ember.js 数据绑定触发）
+  console.log("填写登录表单...");
+  await page.evaluate((user, pass) => {
+    const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    const nameEl = document.querySelector('#login-account-name');
+    const pwEl = document.querySelector('#login-account-password');
+    if (nameEl) {
+      nameEl.focus();
+      nativeSetter.call(nameEl, user);
+      nameEl.dispatchEvent(new Event('input', { bubbles: true }));
+      nameEl.dispatchEvent(new Event('change', { bubbles: true }));
+      nameEl.dispatchEvent(new Event('blur', { bubbles: true }));
+    }
+    if (pwEl) {
+      pwEl.focus();
+      nativeSetter.call(pwEl, pass);
+      pwEl.dispatchEvent(new Event('input', { bubbles: true }));
+      pwEl.dispatchEvent(new Event('change', { bubbles: true }));
+      pwEl.dispatchEvent(new Event('blur', { bubbles: true }));
+    }
+  }, username, password);
   await delayClick(1000);
 
-  // 点击登录
-  await page.click('#login-button');
-  await delayClick(2000);
+  // 提交表单
+  await page.evaluate(() => {
+    const btn = document.querySelector('#login-button');
+    if (btn) btn.click();
+  });
+  await delayClick(3000);
   try {
     await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 });
   } catch {}
