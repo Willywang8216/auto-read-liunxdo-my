@@ -596,43 +596,8 @@ async function launchBrowserForUser(username, password, cookie = null) {
     page.on("load", async () => {
       // await page.evaluate(externalScript); //因为这个是在页面加载好之后执行的,而脚本是在页面加载好时刻来判断是否要执行，由于已经加载好了，脚本就不会起作用
     });
-    // 如果是Linuxdo，就导航到我的帖子，但我感觉这里写没什么用，因为外部脚本已经定义好了，不对，这里不会点击按钮，所以不会跳转，需要手动跳转
-    if (loginUrl == "https://linux.do") {
-      await page.goto("https://linux.do/latest", {
-        waitUntil: "domcontentloaded",
-        timeout: parseInt(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT || "120000", 10),
-      });
-    } else if (loginUrl == "https://meta.appinn.net") {
-      await page.goto("https://meta.appinn.net/t/topic/52006", {
-        waitUntil: "domcontentloaded",
-        timeout: parseInt(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT || "120000", 10),
-      });
-    } else {
-      await page.goto(`${loginUrl}/t/topic/1`, {
-        waitUntil: "domcontentloaded",
-        timeout: parseInt(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT || "120000", 10),
-      });
-    }
-    // Ensure automation injected after navigation (fallback in case init-script failed)
-    try {
-      await page.evaluate(
-        (specificUser, scriptToEval, isAutoLike) => {
-          if (!window.__autoInjected) {
-            localStorage.setItem("read", true);
-            localStorage.setItem("specificUser", specificUser);
-            localStorage.setItem("isFirstRun", "false");
-            localStorage.setItem("autoLikeEnabled", isAutoLike);
-            try { eval(scriptToEval); } catch (e) { console.error("eval external script failed", e); }
-            window.__autoInjected = true;
-          }
-        },
-        specificUser,
-        externalScript,
-        isAutoLike
-      );
-    } catch (e) {
-      console.warn(`Post-navigation inject failed: ${e && e.message ? e.message : e}`);
-    }
+    // 如果是Linuxdo，延迟导航到 /latest（在登入验证和弹窗处理之后）
+    // evaluateOnNewDocument 已注册，导航时会自动执行脚本
     if (token && chatId) {
       sendToTelegram(`${username} 登录成功`);
     } // 监听页面跳转到新话题，自动推送RSS example：https://linux.do/t/topic/525305.rss
@@ -689,35 +654,52 @@ async function launchBrowserForUser(username, password, cookie = null) {
       });
     }
 
-    // 验证阅读脚本是否真正在运行
-    await delayClick(8000); // 等 8 秒让脚本初始化和获取话题
+    // 验证阅读脚本是否真正在运行（不 reload，避免破坏 session）
+    await delayClick(10000); // 等 10 秒让脚本初始化
     try {
-      const readingStatus = await page.evaluate(() => {
-        return {
-          read: localStorage.getItem("read"),
-          topicList: JSON.parse(localStorage.getItem("topicList") || "[]").length,
-          isFirstRun: localStorage.getItem("isFirstRun"),
-        };
-      }).catch(() => ({ read: null, topicList: 0, isFirstRun: null }));
-      console.log(`阅读状态: read=${readingStatus.read}, 待阅读=${readingStatus.topicList}篇, isFirstRun=${readingStatus.isFirstRun}`);
-      if (readingStatus.topicList === 0) {
-        console.warn("话题列表为空，重置 isFirstRun 并刷新...");
+      let topicCount = await page.evaluate(() => {
+        return JSON.parse(localStorage.getItem("topicList") || "[]").length;
+      }).catch(() => 0);
+      console.log(`阅读状态: 待阅读=${topicCount}篇`);
+
+      if (topicCount === 0) {
+        // 话题列表为空，重置 isFirstRun 让脚本重新获取（不 reload）
+        console.warn("话题列表为空，重置 isFirstRun...");
         await page.evaluate(() => {
           localStorage.removeItem("isFirstRun");
           localStorage.removeItem("topicList");
           localStorage.setItem("read", true);
         }).catch(() => {});
-        await page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
-        await waitForCf(page, browser);
-        await delayClick(15000); // 等 15 秒让脚本获取话题列表
-        // 再次检查
-        const retryStatus = await page.evaluate(() => {
+        // 等待脚本自动获取话题（同步 AJAX 应该很快）
+        await delayClick(10000);
+        topicCount = await page.evaluate(() => {
           return JSON.parse(localStorage.getItem("topicList") || "[]").length;
         }).catch(() => 0);
-        console.log(`重置后话题数: ${retryStatus}篇`);
+        console.log(`重置后话题数: ${topicCount}篇`);
+
+        if (topicCount === 0) {
+          // 还是 0，手动触发话题获取
+          console.warn("仍然为空，手动触发话题获取...");
+          await page.evaluate(async () => {
+            try {
+              const resp = await fetch('/latest.json?no_definitions=true&page=0');
+              const data = await resp.json();
+              if (data && data.topic_list && data.topic_list.topics) {
+                const topics = data.topic_list.topics.filter(t => !t.pinned);
+                localStorage.setItem("topicList", JSON.stringify(topics));
+                localStorage.setItem("isFirstRun", "false");
+              }
+            } catch (e) { console.error("手动获取话题失败:", e); }
+          }).catch(() => {});
+          await delayClick(3000);
+          topicCount = await page.evaluate(() => {
+            return JSON.parse(localStorage.getItem("topicList") || "[]").length;
+          }).catch(() => 0);
+          console.log(`手动获取后话题数: ${topicCount}篇`);
+        }
       }
     } catch (e) {
-      console.warn("阅读状态检查失败 (可能页面正在导航):", e.message.substring(0, 80));
+      console.warn("阅读状态检查失败:", e.message ? e.message.substring(0, 80) : e);
     }
 
     // 登录成功后自动更新 _t cookie（唯一能跨浏览器实例复用的 cookie）
@@ -739,6 +721,42 @@ async function launchBrowserForUser(username, password, cookie = null) {
       }
     } catch (e) {
       console.warn("Cookie 自动更新失败:", e.message);
+    }
+
+    // 所有验证完成后，导航到 /latest 开始阅读
+    console.log("导航到 /latest 开始阅读...");
+    await page.goto(loginUrl + "/latest", {
+      waitUntil: "domcontentloaded",
+      timeout: parseInt(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT || "120000", 10),
+    }).catch(() => {});
+    await waitForCf(page, browser);
+    await delayClick(10000); // 等 10 秒让 evaluateOnNewDocument 脚本获取话题
+
+    // 验证话题列表
+    let topicCount = await page.evaluate(() => {
+      return JSON.parse(localStorage.getItem("topicList") || "[]").length;
+    }).catch(() => 0);
+    console.log(`话题列表: ${topicCount}篇`);
+
+    if (topicCount === 0) {
+      console.warn("话题为空，手动获取...");
+      await page.evaluate(async () => {
+        try {
+          const resp = await fetch('/latest.json?no_definitions=true&page=0');
+          const data = await resp.json();
+          if (data && data.topic_list && data.topic_list.topics) {
+            const topics = data.topic_list.topics.filter(t => !t.pinned);
+            localStorage.setItem("topicList", JSON.stringify(topics));
+            localStorage.setItem("isFirstRun", "false");
+            localStorage.setItem("read", true);
+          }
+        } catch (e) {}
+      }).catch(() => {});
+      await delayClick(3000);
+      topicCount = await page.evaluate(() => {
+        return JSON.parse(localStorage.getItem("topicList") || "[]").length;
+      }).catch(() => 0);
+      console.log(`手动获取后: ${topicCount}篇`);
     }
 
     return { browser };
