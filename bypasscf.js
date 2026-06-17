@@ -494,16 +494,16 @@ async function launchBrowserForUser(username, password, cookie = null) {
     }
     // 查找具有类名 "avatar" 的 img 元素验证登录是否成功
     // 若存在 span.auth-buttons 则说明处于未登录状态
-    let avatarImg = await page.$("img.avatar");
-    let authButtons = await page.$("span.auth-buttons");
+    let avatarImg = await page.$("img.avatar").catch(() => null);
+    let authButtons = await page.$("span.auth-buttons").catch(() => null);
 
     // Cookie 登录失败且有密码时，自动退回密码登录
     if ((authButtons || !avatarImg) && cookieLoginAttempted && password) {
       console.log("Cookie 已过期，自动退回密码登录...");
       cookieLoginFailed = true;
       await login(page, username, password);
-      avatarImg = await page.$("img.avatar");
-      authButtons = await page.$("span.auth-buttons");
+      avatarImg = await page.$("img.avatar").catch(() => null);
+      authButtons = await page.$("span.auth-buttons").catch(() => null);
     }
 
     // 如果登录还是失败，等待用户手动登入
@@ -520,8 +520,8 @@ async function launchBrowserForUser(username, password, cookie = null) {
         await page.evaluate(() => {
           document.querySelectorAll('.dialog-footer .btn-primary').forEach(b => b.click());
         }).catch(() => {});
-        avatarImg = await page.$("img.avatar");
-        authButtons = await page.$("span.auth-buttons");
+        avatarImg = await page.$("img.avatar").catch(() => null);
+        authButtons = await page.$("span.auth-buttons").catch(() => null);
         if (avatarImg && !authButtons) {
           console.log("检测到手动登入成功！");
           sendToTelegram(`✅ ${maskUsername(username)} 手动登入成功`);
@@ -690,31 +690,34 @@ async function launchBrowserForUser(username, password, cookie = null) {
     }
 
     // 验证阅读脚本是否真正在运行
-    await delayClick(5000); // 等 5 秒让脚本初始化
+    await delayClick(8000); // 等 8 秒让脚本初始化和获取话题
     try {
       const readingStatus = await page.evaluate(() => {
         return {
           read: localStorage.getItem("read"),
           topicList: JSON.parse(localStorage.getItem("topicList") || "[]").length,
-          currentUrl: window.location.href,
+          isFirstRun: localStorage.getItem("isFirstRun"),
         };
-      });
-      console.log(`阅读状态检查: read=${readingStatus.read}, 待阅读=${readingStatus.topicList}篇`);
-      if (readingStatus.read !== "true" || readingStatus.topicList === 0) {
-        console.warn("阅读脚本可能未正常运行，重置 isFirstRun 触发话题获取...");
-        // 重置 isFirstRun 让 index.js 重新获取话题列表
+      }).catch(() => ({ read: null, topicList: 0, isFirstRun: null }));
+      console.log(`阅读状态: read=${readingStatus.read}, 待阅读=${readingStatus.topicList}篇, isFirstRun=${readingStatus.isFirstRun}`);
+      if (readingStatus.topicList === 0) {
+        console.warn("话题列表为空，重置 isFirstRun 并刷新...");
         await page.evaluate(() => {
           localStorage.removeItem("isFirstRun");
           localStorage.removeItem("topicList");
           localStorage.setItem("read", true);
-        });
-        // 刷新页面让脚本重新执行
-        await page.reload({ waitUntil: "domcontentloaded" });
+        }).catch(() => {});
+        await page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
         await waitForCf(page, browser);
-        await delayClick(8000);
+        await delayClick(15000); // 等 15 秒让脚本获取话题列表
+        // 再次检查
+        const retryStatus = await page.evaluate(() => {
+          return JSON.parse(localStorage.getItem("topicList") || "[]").length;
+        }).catch(() => 0);
+        console.log(`重置后话题数: ${retryStatus}篇`);
       }
     } catch (e) {
-      console.warn("阅读状态检查失败:", e.message);
+      console.warn("阅读状态检查失败 (可能页面正在导航):", e.message.substring(0, 80));
     }
 
     // 登录成功后自动更新 _t cookie（唯一能跨浏览器实例复用的 cookie）
