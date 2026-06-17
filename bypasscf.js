@@ -294,8 +294,13 @@ function delayClick(time) {
   }
 })();
 // 根据用户名更新 .env 中对应的 cookie
-// 登录成功后保存 _t 和 _forum_session cookie
+// 登录成功后保存 _t cookie（串行化写入防止并发覆盖）
+let _cookieWriteQueue = Promise.resolve();
 function updateCookieInEnv(username, cookieList) {
+  _cookieWriteQueue = _cookieWriteQueue.then(() => _doCookieUpdate(username, cookieList));
+  return _cookieWriteQueue;
+}
+function _doCookieUpdate(username, cookieList) {
   try {
     const envPath = path.join(dirname(fileURLToPath(import.meta.url)), ".env");
     if (!fs.existsSync(envPath)) return;
@@ -307,7 +312,6 @@ function updateCookieInEnv(username, cookieList) {
     if (!cookiesMatch) return;
     const cookiesStr = cookiesMatch[1].replace(/^["']|["']$/g, "");
     const cookies = cookiesStr.split(",");
-    // 保存 _t 和 _forum_session，用分号分隔
     cookies[userIndex] = cookieList.join(";");
     const newCookiesStr = `COOKIES=${cookies.join(",")}`;
     envContent = envContent.replace(/^COOKIES=.*$/m, newCookiesStr);
