@@ -519,7 +519,7 @@ async function launchBrowserForUser(username, password, cookie = null) {
 
     // 如果登录还是失败，等待用户手动登入
     if ((authButtons || !avatarImg) && password) {
-      const manualMsg = `⚠️ ${maskUsername(username)} 需要手动登入！请在 Chromium 窗口中登入，脚本会等待 120 秒。`;
+      const manualMsg = `⚠️ ${maskUsername(username)} 需要手动登入！请在 Chromium 窗口中登入，脚本会等待 10 分钟。`;
       console.log(manualMsg);
       sendToTelegram(manualMsg);
       sendToTelegramGroup(manualMsg);
@@ -532,9 +532,9 @@ async function launchBrowserForUser(username, password, cookie = null) {
       await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
       await waitForCf(page, browser);
       await delayClick(2000);
-      // 等待用户手动登入（检查 avatarImg）
+      // 等待用户手动登入（10 分钟）
       const waitStart = Date.now();
-      while (Date.now() - waitStart < 120000) {
+      while (Date.now() - waitStart < 600000) {
         await delayClick(5000);
         // 关闭弹窗
         await page.evaluate(() => {
