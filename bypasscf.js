@@ -373,13 +373,22 @@ async function launchBrowserForUser(username, password, cookie = null) {
     var { connect } = await import("puppeteer-real-browser");
     const { page, browser: newBrowser } = await connect(browserOptions);
     browser = newBrowser; // 将 browser 初始化
-    // 禁用 passkey/WebAuthn 防止 Windows Hello 弹窗阻塞
+    // 拦截并封锁 passkey/WebAuthn 请求，防止 Windows Hello 弹窗
+    await page.setRequestInterception(true);
+    page.on('request', (request) => {
+      const url = request.url();
+      if (url.includes('/session/passkey') || url.includes('webauthn') || url.includes('/challenge.json')) {
+        console.log(`[BLOCKED] ${url.substring(0, 80)}`);
+        request.abort();
+      } else {
+        request.continue();
+      }
+    });
+    // 覆盖 WebAuthn API 使其不可用
     await page.evaluateOnNewDocument(() => {
-      // 覆盖 WebAuthn API 使其不可用
       if (window.PublicKeyCredential) {
         window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable = () => Promise.resolve(false);
       }
-      // 告诉 Discourse 没有 passkey
       localStorage.setItem('hasPasskeys', 'false');
     });
     // 启动截图功能
