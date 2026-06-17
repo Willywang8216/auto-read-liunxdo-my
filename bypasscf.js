@@ -341,7 +341,7 @@ async function launchBrowserForUser(username, password, cookie = null) {
     console.log("当前用户:", maskUsername(username));
     const browserOptions = {
       headless: "auto",
-      args: ["--no-sandbox", "--disable-setuid-sandbox", "--password-store=basic", "--disable-features=PasswordLeakDetection,AutofillServerCommunication"],
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--password-store=basic", "--disable-features=PasswordLeakDetection,AutofillServerCommunication,PasswordManager", "--disable-save-password-bubble", "--disable-autofill-keyboard-accessory-view"],
       customConfig: {
         chromePath: "C:\\Users\\willy\\AppData\\Local\\ms-playwright\\chromium-1223\\chrome-win64\\chrome.exe",
       },
@@ -384,10 +384,30 @@ async function launchBrowserForUser(username, password, cookie = null) {
         request.continue();
       }
     });
+    // 禁用 Chromium 密码管理器（防止 "保存密码" 和 "Windows Hello" 弹窗）
+    const cdpSession = await page.createCDPSession();
+    await cdpSession.send('Page.setWebLifecycleStatus', { status: 'active' }).catch(() => {});
+    await cdpSession.send('Network.setExtraHTTPHeaders', { headers: {} }).catch(() => {});
+    // 通过 CDP 设置 Chromium 偏好，禁用密码保存提示
+    try {
+      await cdpSession.send('Page.navigate', { url: 'about:blank' });
+      await page.evaluate(() => {
+        // 覆盖 PasswordCredential API
+        if (window.PasswordCredential) {
+          window.PasswordCredential = undefined;
+        }
+        // 禁用 WebAuthn
+        if (window.PublicKeyCredential) {
+          window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable = () => Promise.resolve(false);
+          window.PublicKeyCredential.isConditionalMediationAvailable = () => Promise.resolve(false);
+        }
+      });
+    } catch {}
     // 覆盖 WebAuthn API 使其不可用
     await page.evaluateOnNewDocument(() => {
       if (window.PublicKeyCredential) {
         window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable = () => Promise.resolve(false);
+        window.PublicKeyCredential.isConditionalMediationAvailable = () => Promise.resolve(false);
       }
       localStorage.setItem('hasPasskeys', 'false');
     });
