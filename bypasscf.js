@@ -341,7 +341,7 @@ async function launchBrowserForUser(username, password, cookie = null) {
     console.log("当前用户:", maskUsername(username));
     const browserOptions = {
       headless: "auto",
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--password-store=basic", "--disable-features=PasswordLeakDetection,AutofillServerCommunication"],
       customConfig: {
         chromePath: "C:\\Users\\willy\\AppData\\Local\\ms-playwright\\chromium-1223\\chrome-win64\\chrome.exe",
       },
@@ -373,6 +373,15 @@ async function launchBrowserForUser(username, password, cookie = null) {
     var { connect } = await import("puppeteer-real-browser");
     const { page, browser: newBrowser } = await connect(browserOptions);
     browser = newBrowser; // 将 browser 初始化
+    // 禁用 passkey/WebAuthn 防止 Windows Hello 弹窗阻塞
+    await page.evaluateOnNewDocument(() => {
+      // 覆盖 WebAuthn API 使其不可用
+      if (window.PublicKeyCredential) {
+        window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable = () => Promise.resolve(false);
+      }
+      // 告诉 Discourse 没有 passkey
+      localStorage.setItem('hasPasskeys', 'false');
+    });
     // 启动截图功能
     // takeScreenshots(page);
     //登录操作
@@ -813,6 +822,12 @@ async function login(page, username, password, retryCount = 3) {
   const currentUrl = page.url();
   if (!currentUrl.includes('/login')) {
     console.log("导航到 /login 页面...");
+    // 禁用 passkey 防止 Windows Hello 弹窗
+    await page.evaluate(() => {
+      if (window.PublicKeyCredential) {
+        window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable = () => Promise.resolve(false);
+      }
+    }).catch(() => {});
     await page.goto(loginUrl + "/login", { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
     await waitForCf(page, null);
     await delayClick(2000);
