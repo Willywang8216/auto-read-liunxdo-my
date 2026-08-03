@@ -67,9 +67,44 @@ console.log(
   `运行时间限制为：${runTimeLimitMinutes} 分钟 (${runTimeLimitMillis} 毫秒)`
 );
 
+// 活动会话注册表：username -> { page, domain }。用于退出前保存最新的 _t（Discourse 会在会话期间轮换 _t）
+const activeSessions = new Map();
+// 从浏览器读取最新 _t 并写回 .env（浏览器始终持有轮换后的最新 token）
+async function saveFreshestCookie(username, page, domain) {
+  try {
+    if (!page || (page.isClosed && page.isClosed())) return;
+    const client = await page.createCDPSession().catch(() => null);
+    let cookies = [];
+    if (client) {
+      const res = await client.send('Network.getAllCookies').catch(() => ({ cookies: [] }));
+      cookies = (res.cookies || []).filter(c => c.domain.includes(domain));
+    } else {
+      cookies = await page.cookies(loginUrl).catch(() => []);
+    }
+    const tCookie = cookies.find(c => c.name === '_t');
+    if (tCookie) {
+      await updateCookieInEnv(username, [`_t=${tCookie.value}`]);
+      console.log(`💾 已保存最新 _t: ${maskUsername(username)}`);
+    }
+  } catch (e) {
+    console.warn("saveFreshestCookie failed:", e && e.message ? e.message : e);
+  }
+}
+
 // 设置一个定时器，在运行时间到达时终止进程
-const shutdownTimer = setTimeout(() => {
-  console.log("时间到,Reached time limit, shutting down the process...");
+const shutdownTimer = setTimeout(async () => {
+  console.log("时间到,Reached time limit, 退出前保存所有账号最新 _t cookie...");
+  // 退出前保存每个活动会话的最新 _t（关键：跨运行复用需要最新 token）
+  try {
+    await Promise.all(
+      [...activeSessions.entries()].map(([username, sess]) =>
+        saveFreshestCookie(username, sess.page, sess.domain)
+      )
+    );
+  } catch (e) {
+    console.warn("退出前保存 cookie 失败:", e && e.message ? e.message : e);
+  }
+  console.log("Reached time limit, shutting down the process...");
   process.exit(0); // 退出进程
 }, runTimeLimitMillis);
 
@@ -276,6 +311,16 @@ function delayClick(time) {
           Math.floor(i / maxConcurrentAccounts) + 1
         } 完成，关闭浏览器...,浏览器对象：${browsers}`,
       );
+      // 关闭浏览器前，先保存每个活动会话的最新 _t cookie
+      try {
+        await Promise.all(
+          [...activeSessions.entries()].map(([uname, sess]) =>
+            saveFreshestCookie(uname, sess.page, sess.domain)
+          )
+        );
+      } catch (e) {
+        console.warn("关闭前保存 cookie 失败:", e && e.message ? e.message : e);
+      }
       // 关闭所有浏览器实例
       for (const browser of browsers) {
         await browser.close();
@@ -341,7 +386,7 @@ async function launchBrowserForUser(username, password, cookie = null) {
     console.log("当前用户:", maskUsername(username));
     const browserOptions = {
       headless: "auto",
-      args: ["--no-sandbox", "--disable-setuid-sandbox", "--password-store=basic", "--disable-features=PasswordLeakDetection,AutofillServerCommunication,PasswordManager", "--disable-save-password-bubble", "--disable-autofill-keyboard-accessory-view"],
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--password-store=basic", "--disable-features=PasswordLeakDetection,AutofillServerCommunication,PasswordManager,WebAuthentication", "--disable-save-password-bubble", "--disable-autofill-keyboard-accessory-view"],
       customConfig: {
         chromePath: "C:\\Users\\willy\\AppData\\Local\\ms-playwright\\chromium-1223\\chrome-win64\\chrome.exe",
       },
@@ -371,7 +416,13 @@ async function launchBrowserForUser(username, password, cookie = null) {
     }
 
     var { connect } = await import("puppeteer-real-browser");
-    const { page, browser: newBrowser } = await connect(browserOptions);
+    const { page, browser: newBrowser } = await connect({
+      ...browserOptions,
+      prefs: {
+        "credentials_enable_service": false,
+        "profile.password_manager_enabled": false,
+      },
+    });
     browser = newBrowser; // 将 browser 初始化
     // 拦截并封锁 passkey/WebAuthn 请求，防止 Windows Hello 弹窗
     await page.setRequestInterception(true);
@@ -396,19 +447,43 @@ async function launchBrowserForUser(username, password, cookie = null) {
         if (window.PasswordCredential) {
           window.PasswordCredential = undefined;
         }
-        // 禁用 WebAuthn
+        // 禁用 WebAuthn（多层防护）
         if (window.PublicKeyCredential) {
           window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable = () => Promise.resolve(false);
           window.PublicKeyCredential.isConditionalMediationAvailable = () => Promise.resolve(false);
         }
+        // 拦截 navigator.credentials API
+        if (navigator.credentials) {
+          const blockedFn = function() {
+            return Promise.reject(new DOMException('WebAuthn blocked', 'NotAllowedError'));
+          };
+          navigator.credentials.get = blockedFn;
+          navigator.credentials.create = blockedFn;
+        }
       });
     } catch {}
-    // 覆盖 WebAuthn API 使其不可用
+    // 覆盖 WebAuthn API 使其不可用（多层防护）
     await page.evaluateOnNewDocument(() => {
+      // 层1: 禁用 PublicKeyCredential 特性检测
       if (window.PublicKeyCredential) {
         window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable = () => Promise.resolve(false);
         window.PublicKeyCredential.isConditionalMediationAvailable = () => Promise.resolve(false);
       }
+      // 层2: 拦截 navigator.credentials.get/create（防止 Windows Hello 弹窗）
+      if (navigator.credentials) {
+        const blockedFn = function() {
+          return Promise.reject(new DOMException('WebAuthn blocked by automation', 'NotAllowedError'));
+        };
+        try {
+          Object.defineProperty(navigator.credentials, 'get', { value: blockedFn, writable: false, configurable: true });
+          Object.defineProperty(navigator.credentials, 'create', { value: blockedFn, writable: false, configurable: true });
+        } catch (e) {
+          // fallback if defineProperty fails
+          navigator.credentials.get = blockedFn;
+          navigator.credentials.create = blockedFn;
+        }
+      }
+      // 层3: 标记无 passkeys
       localStorage.setItem('hasPasskeys', 'false');
     });
     // 启动截图功能
@@ -496,37 +571,39 @@ async function launchBrowserForUser(username, password, cookie = null) {
       // 导航到域名，先通过 CF challenge
       await page.goto(loginUrl, { waitUntil: "domcontentloaded", timeout: parseInt(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT || "120000", 10) }).catch(() => {});
       await waitForCf(page, browser);
-      // CF 通过后，用 CDP 只设置 _t cookie（_forum_session 跨实例不可用）
+
+      // CF 通过后，用 CDP 设置 _t cookie，带重试（CF 可能清除 cookie）
       const client = await page.createCDPSession();
-      const tCookieObj = cookieObjects.find(c => c.name === '_t');
-      if (tCookieObj) {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        // 设置 _t cookie
         await client.send('Network.setCookie', {
           name: '_t',
-          value: tCookieObj.value,
+          value: savedCookieValue,
           domain: '.' + domain,
           path: '/',
           secure: true,
           httpOnly: true,
         });
-      }
-      console.log(`已设置 _t cookie (CDP)`);
-      // 验证 cookie 设置成功
-      const { cookies: verifyCookies } = await client.send('Network.getAllCookies');
-      const tCookieVerify = verifyCookies.find(c => c.name === '_t' && c.domain.includes(domain));
-      console.log(`CDP cookie 验证: _t=${tCookieVerify ? '存在' : '缺失！'}`);
-      // 带 cookie 刷新页面让 Discourse 读取 session
-      await page.reload({ waitUntil: "domcontentloaded" });
-      await waitForCf(page, browser);
-      // CF 后检查 _t 是否还在，如果丢了就重新设置
-      const { cookies: postCfCookies } = await client.send('Network.getAllCookies');
-      if (!postCfCookies.find(c => c.name === '_t' && c.domain.includes(domain)) && savedCookieValue) {
-        console.log("CF challenge 清除了 _t cookie，重新设置...");
-        await client.send('Network.setCookie', {
-          name: '_t', value: savedCookieValue,
-          domain: '.' + domain, path: '/', secure: true, httpOnly: true,
-        });
+        console.log(`已设置 _t cookie (CDP, attempt ${attempt + 1})`);
+
+        // 验证 cookie 设置成功
+        const { cookies: verifyCookies } = await client.send('Network.getAllCookies');
+        const tCookieVerify = verifyCookies.find(c => c.name === '_t' && c.domain.includes(domain));
+        console.log(`CDP cookie 验证: _t=${tCookieVerify ? '存在' : '缺失！'}`);
+
+        // 带 cookie 刷新页面让 Discourse 读取 session
         await page.reload({ waitUntil: "domcontentloaded" });
         await waitForCf(page, browser);
+
+        // CF 后检查 _t 是否还在
+        const { cookies: postCfCookies } = await client.send('Network.getAllCookies');
+        const tAfterCf = postCfCookies.find(c => c.name === '_t' && c.domain.includes(domain));
+        if (tAfterCf) {
+          console.log(`_t cookie 在 CF 后仍然存在 (attempt ${attempt + 1})`);
+          break;
+        }
+        console.log(`CF challenge 清除了 _t cookie，重试 ${attempt + 1}/3...`);
+        await delayClick(2000);
       }
       await delayClick(2000);
     } else {
@@ -535,19 +612,45 @@ async function launchBrowserForUser(username, password, cookie = null) {
       await login(page, username, password);
     }
     // 查找具有类名 "avatar" 的 img 元素验证登录是否成功
-    // 若存在 span.auth-buttons 则说明处于未登录状态
+    // 页面是 Ember SPA，DOM 标记可能比 session cookie 晚出现；优先询问 Discourse session API。
+    const getSessionUser = async () => page.evaluate(async () => {
+      try {
+        const response = await fetch('/session/current.json', {
+          credentials: 'same-origin',
+          headers: { Accept: 'application/json' },
+        });
+        if (!response.ok) return null;
+        const data = await response.json();
+        return data?.current_user || null;
+      } catch {
+        return null;
+      }
+    }).catch(() => null);
+    const waitForLoggedInUser = async (timeoutMs = 15000) => {
+      const started = Date.now();
+      while (Date.now() - started < timeoutMs) {
+        const currentUser = await getSessionUser();
+        if (currentUser) return currentUser;
+        await delayClick(1000);
+      }
+      return null;
+    };
+
+    let currentUser = await waitForLoggedInUser(5000);
     let avatarImg = await page.$("img.avatar").catch(() => null);
     let authButtons = await page.$("span.auth-buttons").catch(() => null);
+    console.log(`登录状态检查: session=${currentUser ? maskUsername(currentUser.username) : '无'}, avatar=${avatarImg ? '有' : '无'}, auth-buttons=${authButtons ? '有' : '无'}`);
 
     // Cookie 登录失败且有密码时，先清除过期 _t cookie，再退回密码登录
-    if ((authButtons || !avatarImg) && cookieLoginAttempted && password) {
-      console.log("Cookie 已过期，清除过期 _t cookie...");
+    // 关键：以 session API (currentUser) 为准，DOM avatar 可能因 Ember 未渲染而误判
+    if (!currentUser && cookieLoginAttempted && password) {
+      console.log("Cookie 已过期（session API 无 current_user），清除过期 _t cookie...");
       cookieLoginFailed = true;
       // 关键：删除过期的 _t cookie，否则 "You were logged out" 弹窗会无限循环
       try {
         const clearClient = await page.createCDPSession();
-        await clearClient.send('Network.deleteCookies', { name: '_t', domain: '.linux.do' });
-        await clearClient.send('Network.deleteCookies', { name: '_t', domain: 'linux.do' });
+        await clearClient.send('Network.deleteCookies', { name: '_t', domain: '.' + domain });
+        await clearClient.send('Network.deleteCookies', { name: '_t', domain: domain });
         console.log("已清除过期 _t cookie");
       } catch {}
       // 导航到干净的页面（没有过期 cookie，不会弹窗）
@@ -555,12 +658,14 @@ async function launchBrowserForUser(username, password, cookie = null) {
       await waitForCf(page, browser);
       await delayClick(2000);
       await login(page, username, password);
+      currentUser = await waitForLoggedInUser(15000);
       avatarImg = await page.$("img.avatar").catch(() => null);
       authButtons = await page.$("span.auth-buttons").catch(() => null);
+      console.log(`密码登录后状态: session=${currentUser ? maskUsername(currentUser.username) : '无'}, avatar=${avatarImg ? '有' : '无'}, auth-buttons=${authButtons ? '有' : '无'}`);
     }
 
     // 如果登录还是失败，等待用户手动登入
-    if ((authButtons || !avatarImg) && password) {
+    if (!currentUser && password) {
       const manualMsg = `⚠️ ${maskUsername(username)} 需要手动登入！请在 Chromium 窗口中登入，脚本会等待 10 分钟。`;
       console.log(manualMsg);
       sendToTelegram(manualMsg);
@@ -568,8 +673,8 @@ async function launchBrowserForUser(username, password, cookie = null) {
       // 清除过期 cookie 防止弹窗循环
       try {
         const clearClient = await page.createCDPSession();
-        await clearClient.send('Network.deleteCookies', { name: '_t', domain: '.linux.do' });
-        await clearClient.send('Network.deleteCookies', { name: '_t', domain: 'linux.do' });
+        await clearClient.send('Network.deleteCookies', { name: '_t', domain: '.' + domain });
+        await clearClient.send('Network.deleteCookies', { name: '_t', domain: domain });
       } catch {}
       await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
       await waitForCf(page, browser);
@@ -584,6 +689,13 @@ async function launchBrowserForUser(username, password, cookie = null) {
         }).catch(() => {});
         avatarImg = await page.$("img.avatar").catch(() => null);
         authButtons = await page.$("span.auth-buttons").catch(() => null);
+        currentUser = await getSessionUser();
+        if (currentUser && !authButtons) {
+          avatarImg = avatarImg || true;
+          console.log(`检测到手动登入成功: ${maskUsername(currentUser.username)}`);
+          sendToTelegram(`✅ ${maskUsername(username)} 手动登入成功`);
+          break;
+        }
         if (avatarImg && !authButtons) {
           console.log("检测到手动登入成功！");
           sendToTelegram(`✅ ${maskUsername(username)} 手动登入成功`);
@@ -592,15 +704,34 @@ async function launchBrowserForUser(username, password, cookie = null) {
       }
     }
 
-    if (authButtons) {
+    if (!currentUser && authButtons) {
       console.log("找到 auth-buttons，用户未登录，登录失败");
       throw new Error("登录失败：页面显示未登录状态（auth-buttons）");
-    } else if (avatarImg) {
-      console.log("找到avatarImg，登录成功");
+    } else if (currentUser || avatarImg) {
+      console.log(`登录成功${currentUser ? `: ${maskUsername(currentUser.username)}` : "（avatar）"}`);
+      // 立即保存 _t cookie（不等到最后，防止后续代码出错导致 cookie 丢失）
+      try {
+        const saveClient = await page.createCDPSession().catch(() => null);
+        if (saveClient) {
+          const { cookies: loginCookies } = await saveClient.send('Network.getAllCookies');
+          const tAfterLogin = loginCookies.find(c => c.name === '_t' && c.domain.includes(domain));
+          if (tAfterLogin) {
+            updateCookieInEnv(username, [`_t=${tAfterLogin.value}`]);
+            console.log(`✅ Cookie 已立即保存: ${maskUsername(username)} (_t)`);
+          } else {
+            console.log(`⚠️ 登录成功但未找到 _t cookie`);
+          }
+        }
+      } catch (e) {
+        console.warn("立即保存 cookie 失败:", e.message);
+      }
     } else {
       console.log("未找到avatarImg，登录失败");
       throw new Error("登录失败");
     }
+
+    // 注册活动会话，退出时保存最新轮换后的 _t cookie
+    activeSessions.set(username, { page, domain });
 
     //真正执行阅读脚本
 
@@ -612,8 +743,8 @@ async function launchBrowserForUser(username, password, cookie = null) {
       // 清除过期 cookie 打破循环
       try {
         const c = await page.createCDPSession();
-        await c.send('Network.deleteCookies', { name: '_t', domain: '.linux.do' });
-        await c.send('Network.deleteCookies', { name: '_t', domain: 'linux.do' });
+        await c.send('Network.deleteCookies', { name: '_t', domain: '.' + domain });
+        await c.send('Network.deleteCookies', { name: '_t', domain: domain });
       } catch {}
       await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
       await waitForCf(page, browser);
@@ -855,6 +986,14 @@ async function login(page, username, password, retryCount = 3) {
     await page.evaluate(() => {
       if (window.PublicKeyCredential) {
         window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable = () => Promise.resolve(false);
+        window.PublicKeyCredential.isConditionalMediationAvailable = () => Promise.resolve(false);
+      }
+      if (navigator.credentials) {
+        const blockedFn = function() {
+          return Promise.reject(new DOMException('WebAuthn blocked', 'NotAllowedError'));
+        };
+        navigator.credentials.get = blockedFn;
+        navigator.credentials.create = blockedFn;
       }
     }).catch(() => {});
     await page.goto(loginUrl + "/login", { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
@@ -864,6 +1003,16 @@ async function login(page, username, password, retryCount = 3) {
 
   // 使用隐藏的 #hidden-login-form（标准 HTML 表单，不依赖 Ember）
   console.log("使用 hidden-login-form 登入...");
+  // 再次禁用 WebAuthn（防止页面 JS 在表单提交前触发 passkey）
+  await page.evaluate(() => {
+    if (navigator.credentials) {
+      const blockedFn = function() {
+        return Promise.reject(new DOMException('WebAuthn blocked', 'NotAllowedError'));
+      };
+      navigator.credentials.get = blockedFn;
+      navigator.credentials.create = blockedFn;
+    }
+  }).catch(() => {});
   const loginResult = await page.evaluate((user, pass) => {
     const form = document.querySelector('#hidden-login-form');
     if (!form) return { error: 'hidden-login-form not found' };
