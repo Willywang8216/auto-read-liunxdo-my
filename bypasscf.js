@@ -279,7 +279,7 @@ function delayClick(time) {
         return new Promise((resolve, reject) => {
           setTimeout(() => {
             launchBrowserForUser(username, password, cookie)
-              .then(resolve)
+              .then(r => resolve(r))
               .catch(reject);
           }, delay);
         });
@@ -501,23 +501,24 @@ async function launchBrowserForUser(username, password, cookie = null) {
     // });
 
     // console.log("navigator.webdriver is :", isWebDriverUndefined); // 输出应为 false
-    page.on("pageerror", (error) => {
-      console.error(`Page error: ${error.message}`);
-    });
-    page.on("error", async (error) => {
-      // console.error(`Error: ${error.message}`);
-      // 检查是否是 localStorage 的访问权限错误
-      if (
-        error.message.includes(
-          "Failed to read the 'localStorage' property from 'Window'"
-        )
-      ) {
-        console.log("Trying to refresh the page to resolve the issue...");
-        await page.reload(); // 刷新页面
-        // 重新尝试你的操作...
-      }
-    });
-    page.on("console", async (msg) => {
+    if (page) {
+      page.on("pageerror", (error) => {
+        console.error(`Page error: ${error.message}`);
+      });
+      page.on("error", async (error) => {
+        // console.error(`Error: ${error.message}`);
+        // 检查是否是 localStorage 的访问权限错误
+        if (
+          error.message.includes(
+            "Failed to read the 'localStorage' property from 'Window'"
+          )
+        ) {
+          console.log("Trying to refresh the page to resolve the issue...");
+          await page.reload(); // 刷新页面
+          // 重新尝试你的操作...
+        }
+      });
+      page.on("console", async (msg) => {
       // console.log("PAGE LOG:", msg.text());
       // 使用一个标志变量来检测是否已经刷新过页面
       if (
@@ -554,6 +555,7 @@ async function launchBrowserForUser(username, password, cookie = null) {
         // await page.reload();
       }
     });
+    }
     // 登录操作：优先使用Cookie，否则使用表单登录
     let cookieLoginAttempted = false;
     let cookieLoginFailed = false;
@@ -963,7 +965,7 @@ async function launchBrowserForUser(username, password, cookie = null) {
     // throw new Error(err);
     console.log("Error in launchBrowserForUser:", err);
     if (token && chatId) {
-      sendToTelegram(`${err.message}`);
+      sendToTelegram(`${err && err.message ? err.message : String(err)}`);
     }
     return { browser }; // 错误时仍然返回 browser
   }
