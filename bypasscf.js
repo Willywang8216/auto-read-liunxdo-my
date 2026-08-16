@@ -256,15 +256,23 @@ function delayClick(time) {
   // 追蹤成功登入的帳號數，啟動時通知（避免偽綠燈：腳本跑 25 分鐘但一個 cookie 沒過期）
   let successCount = 0;
   try {
+    // 檢查 cookie / password 配置
+    const nonEmptyCookies = cookiesEnv.filter((c) => c && c.trim());
+    const hasAnyCookie = nonEmptyCookies.length > 0;
+    const hasAnyPassword = passwords.length > 0 && passwords.some((p) => p && p.trim());
     // 有Cookie则跳过密码数量校验
-    if (
-      cookiesEnv.filter((c) => c && c.trim()).length === 0 &&
-      passwords.length !== usernames.length
-    ) {
+    if (!hasAnyCookie && passwords.length !== usernames.length) {
       console.log(
         `usernames: ${usernames.length}, passwords: ${passwords.length}`,
       );
       throw new Error("用户名和密码的数量不匹配！");
+    }
+    // 有 cookie 但完全沒有 password，且數量不匹配 → 不要 throw（之前 8/15 卡這裡 25 分鐘）
+    // 改為：log warning 並繼續，由各帳號自己決定 fallback（會 throw 提早失敗）
+    if (hasAnyCookie && passwords.length !== usernames.length && passwords.length !== 0) {
+      console.warn(
+        `⚠️ usernames=${usernames.length} 但 passwords=${passwords.length}（有 cookie 仍會繼續運行）`,
+      );
     }
 
     // 并发启动浏览器实例进行登录
