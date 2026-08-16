@@ -25,6 +25,8 @@ jobs:
       HIDE_ACCOUNT_INFO: "true"
       SPECIFIC_USER: "14790897"
       HEALTH_PORT: "7860"
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
     steps:
       - uses: actions/checkout@v4
@@ -46,4 +48,7 @@ jobs:
         run: npm install
 
       - name: Run auto read
+        env:
+          # 偵測偽綠燈：跑完 25 分鐘若一個 cookie 都沒成功 refresh 就 exit 1
+          FAIL_ON_NO_LOGIN: "true"
         run: node bypasscf.js
