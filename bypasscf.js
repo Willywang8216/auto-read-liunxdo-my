@@ -253,6 +253,8 @@ function delayClick(time) {
 }
 
 (async () => {
+  // 追蹤成功登入的帳號數，啟動時通知（避免偽綠燈：腳本跑 25 分鐘但一個 cookie 沒過期）
+  let successCount = 0;
   try {
     // 有Cookie则跳过密码数量校验
     if (
@@ -279,7 +281,10 @@ function delayClick(time) {
         return new Promise((resolve, reject) => {
           setTimeout(() => {
             launchBrowserForUser(username, password, cookie)
-              .then(r => resolve(r))
+              .then((r) => {
+                if (r && r.loggedIn) successCount++;
+                resolve(r);
+              })
               .catch(reject);
           }, delay);
         });
@@ -328,6 +333,18 @@ function delayClick(time) {
     }
 
     console.log("所有账号登录操作已完成");
+    // 等所有登录完成後再統一通知（避免偽綠燈：之前有跑 25 分鐘一個 cookie 都沒過期的情況）
+    console.log(`成功登入: ${successCount}/${totalAccounts}`);
+    if (token && chatId) {
+      sendToTelegram(`✅ Auto-read 完成: ${successCount}/${totalAccounts} 帳號登入成功`);
+    }
+    if (process.env.FAIL_ON_NO_LOGIN === "true" && successCount === 0) {
+      console.error("FATAL: 全部帳號登入失敗（FAIL_ON_NO_LOGIN=true）");
+      if (token && chatId) {
+        sendToTelegram(`❌ Auto-read 全部帳號登入失敗，請檢查 COOKIES / PAT_TOKEN / linux.do 限流`);
+      }
+      process.exit(1);
+    }
     // 等待所有登录操作完成
     // await Promise.all(loginTasks);
   } catch (error) {
@@ -335,6 +352,9 @@ function delayClick(time) {
     console.error("发生错误：", error);
     if (token && chatId) {
       sendToTelegram(`${error.message}`);
+    }
+    if (process.env.FAIL_ON_NO_LOGIN === "true") {
+      process.exit(1);
     }
   }
 })();
@@ -960,14 +980,14 @@ async function launchBrowserForUser(username, password, cookie = null) {
       console.log(`手动获取后: ${topicCount}篇`);
     }
 
-    return { browser };
+    return { browser, loggedIn: activeSessions.has(username) };
   } catch (err) {
     // throw new Error(err);
     console.log("Error in launchBrowserForUser:", err);
     if (token && chatId) {
       sendToTelegram(`${err && err.message ? err.message : String(err)}`);
     }
-    return { browser }; // 错误时仍然返回 browser
+    return { browser, loggedIn: false }; // 错误时仍然返回 browser
   }
 }
 async function login(page, username, password, retryCount = 3) {

@@ -25,11 +25,14 @@ jobs:
       - name: Write refresh script
         run: |
           cat > /tmp/refresh_cookies.py << 'PYEOF'
-          import json, os, time, sys
+          import json, os, time, random, sys
           from curl_cffi import requests
 
           accounts = json.loads(os.environ['ACCOUNTS_JSON'])
           cookies = []
+
+          # Rotate impersonate to reduce 429 from cloud IPs
+          impersonate_pool = ['chrome124', 'chrome123', 'chrome120', 'edge101', 'safari17_0']
 
           for acc in accounts:
               username = acc['username']
@@ -37,54 +40,74 @@ jobs:
               print(f'Processing {username}...', flush=True)
 
               success = False
-              for attempt in range(3):
+              for attempt in range(4):
                   try:
-                      session = requests.Session(impersonate='chrome124')
+                      ua_choice = random.choice(impersonate_pool)
+                      session = requests.Session(impersonate=ua_choice)
+                      session.headers.update({
+                          'Referer': 'https://linux.do/',
+                          'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                      })
 
                       # Get main page first
-                      r = session.get('https://linux.do/')
-                      print(f'  Main page: {r.status_code}', flush=True)
+                      r = session.get('https://linux.do/', timeout=20)
+                      print(f'  attempt {attempt+1} ua={ua_choice} main={r.status_code}', flush=True)
+
+                      if r.status_code == 429:
+                          backoff = 15 + attempt * 10
+                          print(f'  rate limited, sleeping {backoff}s...', flush=True)
+                          time.sleep(backoff)
+                          continue
+
                       time.sleep(2)
 
                       # Get CSRF
                       r = session.get('https://linux.do/session/csrf.json', headers={
                           'Accept': 'application/json',
                           'X-Requested-With': 'XMLHttpRequest',
-                      })
+                      }, timeout=20)
                       print(f'  CSRF: {r.status_code}', flush=True)
 
                       if r.status_code == 429:
-                          print(f'  Rate limited, waiting 10s...', flush=True)
-                          time.sleep(10)
+                          backoff = 15 + attempt * 10
+                          print(f'  csrf rate limited, sleeping {backoff}s...', flush=True)
+                          time.sleep(backoff)
                           continue
 
-                      if r.status_code == 200:
-                          csrf = json.loads(r.text).get('csrf', '')
-                          time.sleep(1)
+                      if r.status_code != 200:
+                          print(f'  [FAIL] CSRF status {r.status_code}', flush=True)
+                          time.sleep(5 + attempt * 3)
+                          continue
 
-                          # Login
-                          r = session.post('https://linux.do/session',
-                              data={'login': username, 'password': password},
-                              headers={
-                                  'X-CSRF-Token': csrf,
-                                  'X-Requested-With': 'XMLHttpRequest',
-                                  'Accept': 'application/json',
-                              }
-                          )
-                          print(f'  Login: {r.status_code}', flush=True)
+                      csrf = json.loads(r.text).get('csrf', '')
+                      if not csrf:
+                          print(f'  [FAIL] empty csrf token', flush=True)
+                          time.sleep(5)
+                          continue
 
-                          t_cookie = session.cookies.get('_t', '')
-                          if t_cookie:
-                              cookies.append(t_cookie)
-                              print(f'  [OK] Got cookie', flush=True)
-                              success = True
-                              break
-                          else:
-                              print(f'  [FAIL] No _t cookie in response', flush=True)
+                      time.sleep(1)
+
+                      # Login
+                      r = session.post('https://linux.do/session',
+                          data={'login': username, 'password': password},
+                          headers={
+                              'X-CSRF-Token': csrf,
+                              'X-Requested-With': 'XMLHttpRequest',
+                              'Accept': 'application/json',
+                              'Referer': 'https://linux.do/login',
+                          },
+                          timeout=20,
+                      )
+                      print(f'  Login: {r.status_code}', flush=True)
+
+                      t_cookie = session.cookies.get('_t', '')
+                      if t_cookie and r.status_code == 200:
+                          cookies.append(t_cookie)
+                          print(f'  [OK] Got cookie', flush=True)
+                          success = True
+                          break
                       else:
-                          print(f'  [FAIL] CSRF blocked', flush=True)
-
-                      time.sleep(5)
+                          print(f'  [FAIL] No _t cookie (status={r.status_code})', flush=True)
                   except Exception as e:
                       print(f'  [ERROR] {e}', flush=True)
                       time.sleep(5)
@@ -93,7 +116,8 @@ jobs:
                   cookies.append('')
                   print(f'  [FAIL] All attempts failed', flush=True)
 
-              time.sleep(3)
+              # Wait between accounts (with jitter to avoid 429 patterns)
+              time.sleep(3 + random.randint(0, 4))
 
           result = ','.join(cookies)
           print(f'', flush=True)

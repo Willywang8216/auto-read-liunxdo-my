@@ -33,75 +33,131 @@ jobs:
         env:
           ACCOUNTS_JSON: ${{ secrets.ACCOUNTS_JSON }}
         run: |
-          python -c "
-          import json, os, time
+          cat > /tmp/refresh_cookies.py << 'PYEOF'
+          import json, os, time, random, sys
           from curl_cffi import requests
 
           accounts = json.loads(os.environ['ACCOUNTS_JSON'])
           cookies = []
 
+          # Rotate impersonate to reduce 429 from cloud IPs
+          impersonate_pool = ['chrome124', 'chrome123', 'chrome120', 'edge101', 'safari17_0']
+
           for acc in accounts:
               username = acc['username']
               password = acc['password']
-              print(f'Processing {username}...')
+              print(f'Processing {username}...', flush=True)
 
-              session = requests.Session(impersonate='chrome110')
+              success = False
+              for attempt in range(4):
+                  try:
+                      # Random UA + Referer to look more like a real browser
+                      ua_choice = random.choice(impersonate_pool)
+                      session = requests.Session(impersonate=ua_choice)
+                      session.headers.update({
+                          'Referer': 'https://linux.do/',
+                          'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                      })
 
-              # Get main page
-              r = session.get('https://linux.do/')
-              print(f'  Main page: {r.status_code}')
+                      # Get main page first to seed cookies / cf clearance
+                      r = session.get('https://linux.do/', timeout=20)
+                      print(f'  attempt {attempt+1} ua={ua_choice} main={r.status_code}', flush=True)
 
-              # Get CSRF
-              r = session.get('https://linux.do/session/csrf.json', headers={
-                  'Accept': 'application/json',
-                  'X-Requested-With': 'XMLHttpRequest',
-              })
-              print(f'  CSRF: {r.status_code}')
+                      # Respect rate limits: longer backoff each retry
+                      if r.status_code == 429:
+                          backoff = 15 + attempt * 10
+                          print(f'  rate limited, sleeping {backoff}s...', flush=True)
+                          time.sleep(backoff)
+                          continue
 
-              if r.status_code == 200:
-                  csrf = json.loads(r.text).get('csrf', '')
-                  # Login
-                  r = session.post('https://linux.do/session',
-                      data={'login': username, 'password': password},
-                      headers={
-                          'X-CSRF-Token': csrf,
-                          'X-Requested-With': 'XMLHttpRequest',
+                      time.sleep(2)
+
+                      # Get CSRF
+                      r = session.get('https://linux.do/session/csrf.json', headers={
                           'Accept': 'application/json',
-                      }
-                  )
-                  print(f'  Login: {r.status_code}')
+                          'X-Requested-With': 'XMLHttpRequest',
+                      }, timeout=20)
+                      print(f'  CSRF: {r.status_code}', flush=True)
 
-                  t_cookie = session.cookies.get('_t', '')
-                  if t_cookie:
-                      cookies.append(t_cookie)
-                      print(f'  ✓ Got cookie')
-                  else:
-                      cookies.append('')
-                      print(f'  ✗ No cookie')
-              else:
+                      if r.status_code == 429:
+                          backoff = 15 + attempt * 10
+                          print(f'  csrf rate limited, sleeping {backoff}s...', flush=True)
+                          time.sleep(backoff)
+                          continue
+
+                      if r.status_code != 200:
+                          print(f'  [FAIL] CSRF status {r.status_code}', flush=True)
+                          time.sleep(5 + attempt * 3)
+                          continue
+
+                      csrf = json.loads(r.text).get('csrf', '')
+                      if not csrf:
+                          print(f'  [FAIL] empty csrf token', flush=True)
+                          time.sleep(5)
+                          continue
+
+                      time.sleep(1)
+
+                      # Login
+                      r = session.post('https://linux.do/session',
+                          data={'login': username, 'password': password},
+                          headers={
+                              'X-CSRF-Token': csrf,
+                              'X-Requested-With': 'XMLHttpRequest',
+                              'Accept': 'application/json',
+                              'Referer': 'https://linux.do/login',
+                          },
+                          timeout=20,
+                      )
+                      print(f'  Login: {r.status_code}', flush=True)
+
+                      t_cookie = session.cookies.get('_t', '')
+                      if t_cookie and r.status_code == 200:
+                          cookies.append(t_cookie)
+                          print(f'  [OK] Got cookie', flush=True)
+                          success = True
+                          break
+                      else:
+                          print(f'  [FAIL] No _t cookie (status={r.status_code})', flush=True)
+                  except Exception as e:
+                      print(f'  [ERROR] {e}', flush=True)
+                      time.sleep(5)
+
+              if not success:
                   cookies.append('')
-                  print(f'  ✗ CSRF blocked')
+                  print(f'  [FAIL] All attempts failed', flush=True)
 
-              time.sleep(3)
+              # Wait between accounts
+              time.sleep(3 + random.randint(0, 4))
 
           result = ','.join(cookies)
-          print(f'COOKIES={result}')
+          print(f'', flush=True)
+          print(f'COOKIES={result}', flush=True)
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               f.write(f'cookies={result}\n')
-          "
+          PYEOF
+          python /tmp/refresh_cookies.py
 
-      - name: Update COOKIES secret
-        if: steps.refresh.outputs.cookies != ''
-        uses: hmanzur/actions-set-secret@v2.0.0
-        with:
-          name: 'COOKIES'
-          value: ${{ steps.refresh.outputs.cookies }}
-          repository: ${{ github.repository }}
-          token: ${{ secrets.PAT_TOKEN }}
+      - name: Show results
+        if: always()
+        run: |
+          echo "=========================================="
+          echo "NEW COOKIES VALUE:"
+          echo "${{ steps.refresh.outputs.cookies }}"
+          echo "=========================================="
+
+      - name: Auto-update COOKIES secret
+        if: steps.refresh.outputs.cookies != '' && !contains(steps.refresh.outputs.cookies, ',,')
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          gh secret set COOKIES --body "${{ steps.refresh.outputs.cookies }}" --repo ${{ github.repository }}
+          echo "COOKIES secret updated automatically!"
 
   # Job 2: Daily auto-read (runs every day)
   auto-read:
     if: github.event.schedule == '0 10 * * *' || github.event_name == 'workflow_dispatch'
+    needs: refresh-cookies
     runs-on: ubuntu-latest
     timeout-minutes: 35
 
@@ -119,6 +175,8 @@ jobs:
       HIDE_ACCOUNT_INFO: "true"
       SPECIFIC_USER: "14790897"
       HEALTH_PORT: "7860"
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
     steps:
       - uses: actions/checkout@v4
@@ -140,4 +198,6 @@ jobs:
         run: npm install
 
       - name: Run auto read
+        env:
+          FAIL_ON_NO_LOGIN: "true"
         run: node bypasscf.js
