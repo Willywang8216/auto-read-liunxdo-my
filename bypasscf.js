@@ -482,9 +482,15 @@ async function launchBrowserForUser(username, password, cookie = null) {
   let browser = null; // 在 try 之外声明 browser 变量
   try {
     console.log("当前用户:", maskUsername(username));
+    // HEADLESS 設定：
+    //   - 預設 "auto" (puppeteer-real-browser 自動判斷；Windows GUI 上會開視窗)
+    //   - 設為 "false" 強制 headless（雲端 / 無桌面環境）
+    //   - 設為 "new" 強制新 headless 模式但保留視窗（Linux Xvfb）
+    // 為了讓 user 手動解 CF / 手動登入，建議 "auto" 或 "new"
+    const headlessMode = process.env.HEADLESS_MODE || "auto";
     const browserOptions = {
-      headless: "auto",
-      args: ["--no-sandbox", "--disable-setuid-sandbox", "--password-store=basic", "--disable-features=PasswordLeakDetection,AutofillServerCommunication,PasswordManager,WebAuthentication", "--disable-save-password-bubble", "--disable-autofill-keyboard-accessory-view"],
+      headless: headlessMode,
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--password-store=basic", "--disable-features=PasswordLeakDetection,AutofillServerCommunication,PasswordManager,WebAuthentication", "--disable-save-password-bubble", "--disable-autofill-keyboard-accessory-view", "--start-maximized", "--window-size=1280,800"],
       customConfig: {
         chromePath: "C:\\Users\\willy\\AppData\\Local\\ms-playwright\\chromium-1223\\chrome-win64\\chrome.exe",
       },
