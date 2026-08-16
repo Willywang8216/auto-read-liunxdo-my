@@ -167,6 +167,7 @@ jobs:
 
     env:
       USERNAMES: ${{ secrets.USERNAMES }}
+      PASSWORDS: ${{ secrets.PASSWORDS }}
       COOKIES: ${{ secrets.COOKIES }}
       WEBSITE: "https://linux.do"
       RUN_TIME_LIMIT_MINUTES: "25"
