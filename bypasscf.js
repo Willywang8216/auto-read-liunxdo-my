@@ -255,7 +255,12 @@ function delayClick(time) {
 (async () => {
   // 追蹤成功登入的帳號數，啟動時通知（避免偽綠燈：腳本跑 25 分鐘但一個 cookie 沒過期）
   let successCount = 0;
+  let fatalError = null; // 收集致命錯誤，最後統一處理
   try {
+    // 啟動時通知（DEBUG 用：確認排程/手動觸發有真的進到腳本）
+    if (token && chatId) {
+      sendToTelegram(`🚀 Auto-read 啟動：${usernames.length} 帳號 / 限制 ${process.env.RUN_TIME_LIMIT_MINUTES || 25} 分鐘`);
+    }
     // 檢查 cookie / password 配置
     const nonEmptyCookies = cookiesEnv.filter((c) => c && c.trim());
     const hasAnyCookie = nonEmptyCookies.length > 0;
@@ -281,19 +286,23 @@ function delayClick(time) {
       const cookie = cookiesEnv[index] ? cookiesEnv[index].trim() : null;
       const delay = (index % maxConcurrentAccounts) * delayBetweenInstances; // 使得每一组内的浏览器可以分开启动
       return () => {
-        // 确保这里返回的是函数,因为settimeout本身是异步的所以必须在外面给他一个promise await才能让它同步的等待这个时间才能执行
-        // 可以改为 return async () => {
-        // await new Promise((resolve) => setTimeout(resolve, delay));
-        // return await launchBrowserForUser(username, password, cookie);
-        // };  更好理解
-        return new Promise((resolve, reject) => {
+        return new Promise((resolve) => {
           setTimeout(() => {
             launchBrowserForUser(username, password, cookie)
               .then((r) => {
                 if (r && r.loggedIn) successCount++;
+                else if (r && r.error) {
+                  // 個別帳號的錯誤（不會 throw 整個 script 崩潰）
+                  console.warn(`⚠️ ${maskUsername(username)} 登入失敗：${r.error}`);
+                }
                 resolve(r);
               })
-              .catch(reject);
+              .catch((e) => {
+                // 個別帳號拋錯：記錄但不 throw（讓其他帳號繼續）
+                console.error(`❌ ${maskUsername(username)} 拋錯：${e.message}`);
+                sendToTelegram(`❌ ${maskUsername(username)} 拋錯：${e.message}`);
+                resolve({ browser: null, loggedIn: false, error: e.message });
+              });
           }, delay);
         });
       };
@@ -344,14 +353,21 @@ function delayClick(time) {
     // 等所有登录完成後再統一通知（避免偽綠燈：之前有跑 25 分鐘一個 cookie 都沒過期的情況）
     console.log(`成功登入: ${successCount}/${totalAccounts}`);
     if (token && chatId) {
-      sendToTelegram(`✅ Auto-read 完成: ${successCount}/${totalAccounts} 帳號登入成功`);
-    }
-    if (process.env.FAIL_ON_NO_LOGIN === "true" && successCount === 0) {
-      console.error("FATAL: 全部帳號登入失敗（FAIL_ON_NO_LOGIN=true）");
-      if (token && chatId) {
-        sendToTelegram(`❌ Auto-read 全部帳號登入失敗，請檢查 COOKIES / PAT_TOKEN / linux.do 限流`);
+      if (successCount === 0) {
+        sendToTelegram(`❌ Auto-read 全部登入失敗 (0/${totalAccounts})\n請檢查 COOKIES、PASSWORDS、linux.do 狀態`);
+      } else if (successCount < totalAccounts) {
+        sendToTelegram(`⚠️ Auto-read 部分登入成功 (${successCount}/${totalAccounts})`);
+      } else {
+        sendToTelegram(`✅ Auto-read 全部登入成功 (${successCount}/${totalAccounts})`);
       }
-      process.exit(1);
+    }
+    // FAIL_ON_NO_LOGIN 真的 exit 1（避免偽綠燈）
+    if (successCount === 0) {
+      console.error("FATAL: 全部帳號登入失敗");
+      if (token && chatId) {
+        sendToTelegram(`❌ Auto-read 全部帳號登入失敗，請檢查 COOKIES / PASSWORDS / linux.do 限流 / CF challenge`);
+      }
+      fatalError = new Error("All accounts login failed");
     }
     // 等待所有登录操作完成
     // await Promise.all(loginTasks);
@@ -359,10 +375,16 @@ function delayClick(time) {
     // 错误处理逻辑
     console.error("发生错误：", error);
     if (token && chatId) {
-      sendToTelegram(`${error.message}`);
+      sendToTelegram(`💥 Auto-read 拋錯：${error.message}`);
     }
-    if (process.env.FAIL_ON_NO_LOGIN === "true") {
+    fatalError = error;
+  } finally {
+    // 統一退出碼：fatal → 1，否則 → 0
+    if (fatalError) {
+      console.error(`退出碼 1（${fatalError.message}）`);
       process.exit(1);
+    } else {
+      process.exit(0);
     }
   }
 })();
@@ -447,13 +469,20 @@ async function launchBrowserForUser(username, password, cookie = null) {
     }
 
     var { connect } = await import("puppeteer-real-browser");
-    const { page, browser: newBrowser } = await connect({
+    const connectResult = await connect({
       ...browserOptions,
       prefs: {
         "credentials_enable_service": false,
         "profile.password_manager_enabled": false,
       },
     });
+    const page = connectResult && connectResult.page;
+    const newBrowser = connectResult && connectResult.browser;
+    if (!page || !newBrowser) {
+      throw new Error(
+        `puppeteer-real-browser connect() 沒有回傳 page/browser（連線失敗，可能是 Chrome 未啟動）`,
+      );
+    }
     browser = newBrowser; // 将 browser 初始化
     // 拦截并封锁 passkey/WebAuthn 请求，防止 Windows Hello 弹窗
     await page.setRequestInterception(true);
@@ -705,16 +734,44 @@ async function launchBrowserForUser(username, password, cookie = null) {
       await page.goto(loginUrl, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
       await waitForCf(page, browser);
       await delayClick(2000);
-      await login(page, username, password);
-      currentUser = await waitForLoggedInUser(15000);
-      avatarImg = await page.$("img.avatar").catch(() => null);
-      authButtons = await page.$("span.auth-buttons").catch(() => null);
-      console.log(`密码登录后状态: session=${currentUser ? maskUsername(currentUser.username) : '无'}, avatar=${avatarImg ? '有' : '无'}, auth-buttons=${authButtons ? '有' : '无'}`);
+      // 密码登入重试 3 次（每次等待 CF + 表单提交 + 验证 session）
+      const passwordAttempts = parseInt(process.env.PASSWORD_RETRY || "3", 10);
+      for (let pAttempt = 1; pAttempt <= passwordAttempts; pAttempt++) {
+        console.log(`🔐 密碼登入嘗試 ${pAttempt}/${passwordAttempts}`);
+        try {
+          await login(page, username, password);
+          currentUser = await waitForLoggedInUser(15000);
+          avatarImg = await page.$("img.avatar").catch(() => null);
+          authButtons = await page.$("span.auth-buttons").catch(() => null);
+          console.log(`密码登录后状态 (attempt ${pAttempt}): session=${currentUser ? maskUsername(currentUser.username) : '无'}, avatar=${avatarImg ? '有' : '无'}, auth-buttons=${authButtons ? '有' : '无'}`);
+          if (currentUser) {
+            console.log(`✅ 密碼登入成功（attempt ${pAttempt}）`);
+            break;
+          }
+          // 失敗：嘗試清除 cookie + 重新導航再試
+          if (pAttempt < passwordAttempts) {
+            console.log(`❌ 密碼登入失敗，重新嘗試...`);
+            try {
+              const c = await page.createCDPSession();
+              await c.send('Network.deleteCookies', { name: '_t', domain: '.' + domain });
+              await c.send('Network.deleteCookies', { name: '_t', domain: domain });
+            } catch {}
+            await page.goto(loginUrl, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+            await waitForCf(page, browser);
+            await delayClick(3000);
+          }
+        } catch (loginErr) {
+          console.warn(`⚠️ 密碼登入 attempt ${pAttempt} 拋出錯誤：${loginErr.message}`);
+        }
+      }
     }
 
     // 如果登录还是失败，等待用户手动登入
     if (!currentUser && password) {
-      const manualMsg = `⚠️ ${maskUsername(username)} 需要手动登入！请在 Chromium 窗口中登入，脚本会等待 10 分钟。`;
+      // 改成：sendToTelegram 一定要送（即使 manual TG 失敗也要 log）
+      const manualMsg = `⚠️ ${maskUsername(username)} 自動登入失敗！請到瀏覽器手動登入，腳本會等待 10 分鐘。\n` +
+        `可能原因：CF challenge、linux.do 改登入流程、密碼過期\n` +
+        `請檢查後手動登入，或更新 COOKIES 後重跑`;
       console.log(manualMsg);
       sendToTelegram(manualMsg);
       sendToTelegramGroup(manualMsg);
@@ -727,27 +784,32 @@ async function launchBrowserForUser(username, password, cookie = null) {
       await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
       await waitForCf(page, browser);
       await delayClick(2000);
-      // 等待用户手动登入（10 分钟）
+      // 等待用户手动登入（10 分钟）—— 但有最壞情況：context 被 CF 銷毀，這時要 catch 不要讓整個 launchBrowserForUser 崩潰
       const waitStart = Date.now();
       while (Date.now() - waitStart < 600000) {
-        await delayClick(5000);
-        // 关闭弹窗
-        await page.evaluate(() => {
-          document.querySelectorAll('.dialog-footer .btn-primary').forEach(b => b.click());
-        }).catch(() => {});
-        avatarImg = await page.$("img.avatar").catch(() => null);
-        authButtons = await page.$("span.auth-buttons").catch(() => null);
-        currentUser = await getSessionUser();
-        if (currentUser && !authButtons) {
-          avatarImg = avatarImg || true;
-          console.log(`检测到手动登入成功: ${maskUsername(currentUser.username)}`);
-          sendToTelegram(`✅ ${maskUsername(username)} 手动登入成功`);
-          break;
-        }
-        if (avatarImg && !authButtons) {
-          console.log("检测到手动登入成功！");
-          sendToTelegram(`✅ ${maskUsername(username)} 手动登入成功`);
-          break;
+        try {
+          await delayClick(5000);
+          // 关闭弹窗
+          await page.evaluate(() => {
+            document.querySelectorAll('.dialog-footer .btn-primary').forEach(b => b.click());
+          }).catch(() => {});
+          avatarImg = await page.$("img.avatar").catch(() => null);
+          authButtons = await page.$("span.auth-buttons").catch(() => null);
+          currentUser = await getSessionUser().catch(() => null);
+          if (currentUser && !authButtons) {
+            avatarImg = avatarImg || true;
+            console.log(`检测到手动登入成功: ${maskUsername(currentUser.username)}`);
+            sendToTelegram(`✅ ${maskUsername(username)} 手动登入成功`);
+            break;
+          }
+          if (avatarImg && !authButtons) {
+            console.log("检测到手动登入成功！");
+            sendToTelegram(`✅ ${maskUsername(username)} 手动登入成功`);
+            break;
+          }
+        } catch (waitErr) {
+          // 捕獲「context destroyed」等錯誤，不要退出 loop，繼續等
+          console.warn(`手動登入等待中發生錯誤（忽略繼續）: ${waitErr.message}`);
         }
       }
     }
@@ -1006,14 +1068,18 @@ async function launchBrowserForUser(username, password, cookie = null) {
       console.log(`手动获取后: ${topicCount}篇`);
     }
 
-    return { browser, loggedIn: activeSessions.has(username) };
+    return { browser, loggedIn: activeSessions.has(username), error: null };
   } catch (err) {
     // throw new Error(err);
     console.log("Error in launchBrowserForUser:", err);
     if (token && chatId) {
       sendToTelegram(`${err && err.message ? err.message : String(err)}`);
     }
-    return { browser, loggedIn: false }; // 错误时仍然返回 browser
+    // 即使出錯也要 try close 瀏覽器，避免殘留 process
+    if (browser) {
+      try { await browser.close(); } catch {}
+    }
+    return { browser: null, loggedIn: false, error: err && err.message ? err.message : String(err) };
   }
 }
 async function login(page, username, password, retryCount = 3) {
