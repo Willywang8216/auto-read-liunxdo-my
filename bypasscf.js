@@ -393,11 +393,14 @@ function parseCookieString(cookieStr, domain) {
     .map((part) => part.trim())
     .filter((part) => part.includes("="))
     .map((part) => {
+      // 只在第一個 '=' 切割（cookie value 可能含 '='）
       const eqIndex = part.indexOf("=");
       const name = part.substring(0, eqIndex).trim();
       const value = part.substring(eqIndex + 1).trim();
       return { name, value, domain, path: "/" };
-    });
+    })
+    // 過濾掉 name 為空或 value 為空（避免 setCookie 報錯）
+    .filter((c) => c.name && c.value);
 }
 
 async function launchBrowserForUser(username, password, cookie = null) {
@@ -583,6 +586,8 @@ async function launchBrowserForUser(username, password, cookie = null) {
     const domain = new URL(loginUrl).hostname;
     const cookieObjects = cookie ? parseCookieString(cookie, domain) : [];
     const hasT = cookieObjects.some(c => c.name === '_t');
+    // 當 cookie 過期或登入失敗，記錄實際原因（給 DEBUG 用）
+    let cookieExpiredReason = null;
     // 只要有 _t 就尝试 cookie 登入（_forum_session 跨实例不可用，不依赖它）
     if (cookie && hasT) {
       console.log("检测到 _t cookie，尝试Cookie登录");
@@ -628,8 +633,12 @@ async function launchBrowserForUser(username, password, cookie = null) {
         await delayClick(2000);
       }
       await delayClick(2000);
+    } else if (cookie) {
+      // cookie 存在但沒有 _t → 視為失敗，不要走 login() 浪費時間（沒有密碼）
+      cookieExpiredReason = "cookie 缺少 _t，視為無效";
+      console.log(`⚠️ ${cookieExpiredReason}，跳過 login()（password 為空）`);
     } else {
-      // Cookie 不完整或没有，直接走 login()
+      // Cookie 完全沒有，直接走 login()
       console.log("Cookie 不完整或没有，尝试密码登录...");
       await login(page, username, password);
     }
@@ -665,6 +674,15 @@ async function launchBrowserForUser(username, password, cookie = null) {
 
     // Cookie 登录失败且有密码时，先清除过期 _t cookie，再退回密码登录
     // 关键：以 session API (currentUser) 为准，DOM avatar 可能因 Ember 未渲染而误判
+    if (!currentUser && cookieLoginAttempted && !password) {
+      // 只有 cookie、沒有密碼 → 不要再走「手动登入 10 分钟」流程（會卡住整個 workflow 25 分鐘）
+      cookieExpiredReason = cookieExpiredReason || "session API 無 current_user 且 password 為空";
+      console.error(`❌ ${maskUsername(username)} cookie 過期且無 password fallback：${cookieExpiredReason}`);
+      if (token && chatId) {
+        sendToTelegram(`❌ ${maskUsername(username)} cookie 過期且無 password fallback，請更新 COOKIES secret\n原因：${cookieExpiredReason}`);
+      }
+      throw new Error(`cookie 過期且無 password：${cookieExpiredReason}`);
+    }
     if (!currentUser && cookieLoginAttempted && password) {
       console.log("Cookie 已过期（session API 无 current_user），清除过期 _t cookie...");
       cookieLoginFailed = true;
