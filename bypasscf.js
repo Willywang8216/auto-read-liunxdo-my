@@ -245,6 +245,51 @@ async function sendToTelegramGroup(message) {
   }
 }
 
+// 發送 Cloudflare challenge 截圖到 Telegram（給使用者手動解）
+async function sendCfScreenshotToTelegram(page, username) {
+  if (!bot || !chatId) {
+    console.warn("sendCfScreenshotToTelegram: bot/chatId 不存在，跳過");
+    return;
+  }
+  try {
+    // 用 puppeteer-real-browser 的 page.screenshot 是 buffer
+    const buf = await page.screenshot({ type: "png", fullPage: false });
+    const masked = maskUsername(username);
+    const caption =
+      `🛡️ Cloudflare challenge 等待中\n` +
+      `帳號: ${masked}\n` +
+      `請打開你的瀏覽器 → http://localhost:9222\n` +
+      `（或直接到 linux.do 通過 challenge）\n` +
+      `通過後腳本會自動繼續。`;
+    // 用 sendPhoto（直接傳 buffer）
+    await bot.sendPhoto(chatId, buf, { caption: caption.slice(0, 1024) });
+    console.log(`📸 CF 截圖已送出 (${masked})`);
+  } catch (e) {
+    console.warn(`sendCfScreenshotToTelegram 失敗: ${e.message}`);
+  }
+}
+
+// 發送 Cloudflare 提示 + 截圖到 Telegram（每 30 秒最多一次，避免刷屏）
+const _cfNotifyState = new Map(); // username -> lastNotifyTs
+async function notifyCfChallenge(page, username, reason) {
+  const now = Date.now();
+  const last = _cfNotifyState.get(username) || 0;
+  if (now - last < 30000) return; // 30 秒節流
+  _cfNotifyState.set(username, now);
+  const masked = maskUsername(username);
+  const msg =
+    `🛡️ Cloudflare challenge 等待手動通過\n` +
+    `帳號: ${masked}\n` +
+    `原因: ${reason || 'CF page detected'}\n` +
+    `請到瀏覽器視窗手動通過 challenge\n` +
+    `腳本會等你最多 5 分鐘`;
+  console.log(msg);
+  await sendToTelegram(msg);
+  await sendToTelegramGroup(msg);
+  // 同時送截圖
+  await sendCfScreenshotToTelegram(page, username);
+}
+
 //随机等待时间
 function delayClick(time) {
   return new Promise(function (resolve) {
@@ -1160,12 +1205,10 @@ async function navigatePage(url, page, browser) {
   while (pageTitle.includes("Just a moment") || pageTitle.includes("请稍候")) {
     console.log("The page is under Cloudflare protection. Waiting...");
 
-    // CF 保护超过 5 秒 → 可能需要人工验证，发送 Telegram 通知
+    // CF 保护超过 5 秒 → 可能需要人工验证，发送 Telegram 通知（含截圖）
     if (!cfNotified && Date.now() - startTime > 5000) {
-      console.log("CF 保护持续超过 5 秒，发送 Telegram 通知...");
-      const cfMsg = `⚠️ Cloudflare 验证中！请到浏览器手动通过，脚本会等待 120 秒。`;
-      sendToTelegram(cfMsg);
-      sendToTelegramGroup(cfMsg);
+      console.log("CF 保護超過 5 秒，送 Telegram 截圖通知...");
+      await notifyCfChallenge(page, `navigate-${Date.now()}`, '首次進入 linux.do');
       cfNotified = true;
     }
 
@@ -1204,14 +1247,12 @@ async function waitForCf(page, browser) {
   let cfNotified = false;
   while (title.includes("Just a moment") || title.includes("请稍候")) {
     if (!cfNotified && Date.now() - start > 5000) {
-      const cfMsg = `⚠️ Cloudflare 验证中！请到浏览器手动通过。`;
-      sendToTelegram(cfMsg);
-      sendToTelegramGroup(cfMsg);
+      await notifyCfChallenge(page, `waitcf-${Date.now()}`, '等 CF 完成');
       cfNotified = true;
     }
     await delayClick(2000);
     title = await safeTitle(page);
-    if (Date.now() - start > (cfNotified ? 120000 : 35000)) {
+    if (Date.now() - start > (cfNotified ? 300000 : 35000)) {
       console.log("CF wait timeout");
       return;
     }
