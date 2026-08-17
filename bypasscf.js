@@ -104,9 +104,29 @@ const shutdownTimer = setTimeout(async () => {
   } catch (e) {
     console.warn("退出前保存 cookie 失败:", e && e.message ? e.message : e);
   }
+  // 關閉所有開過的 browser（含 chromium 子進程）
+  try {
+    const { execSync } = await import("child_process");
+    console.log("清理殘留 Chrome 進程...");
+    execSync('taskkill /F /IM chrome.exe /T', { stdio: 'ignore' });
+  } catch (e) {
+    console.warn("清理 chrome 失敗:", e && e.message ? e.message : e);
+  }
   console.log("Reached time limit, shutting down the process...");
   process.exit(0); // 退出进程
 }, runTimeLimitMillis);
+
+// 全域 signal handler：Ctrl+C / kill 時也清 chrome
+async function cleanupAndExit(code) {
+  try {
+    const { execSync } = await import("child_process");
+    execSync('taskkill /F /IM chrome.exe /T', { stdio: 'ignore' });
+  } catch {}
+  process.exit(code);
+}
+process.on('SIGINT', () => cleanupAndExit(130));
+process.on('SIGTERM', () => cleanupAndExit(143));
+// finally 區塊也會清，這裡保險用
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const chatId = process.env.TELEGRAM_CHAT_ID;
@@ -252,8 +272,13 @@ async function sendCfScreenshotToTelegram(page, username) {
     return;
   }
   try {
-    // 用 puppeteer-real-browser 的 page.screenshot 是 buffer
-    const buf = await page.screenshot({ type: "png", fullPage: false });
+    // 先存成 temp file → 用 file path 送（Telegram node-api 對 buffer 有時 parse 失敗）
+    const os = await import("os");
+    const fsMod = await import("fs");
+    const tmpDir = os.tmpdir();
+    const fileName = `cf-${username.replace(/[^a-zA-Z0-9]/g, "_")}-${Date.now()}.png`;
+    const filePath = `${tmpDir}\\${fileName}`.replace(/\\/g, "/");
+    await page.screenshot({ path: filePath, type: "png", fullPage: false });
     const masked = maskUsername(username);
     const caption =
       `🛡️ Cloudflare challenge 等待中\n` +
@@ -261,9 +286,14 @@ async function sendCfScreenshotToTelegram(page, username) {
       `請打開你的瀏覽器 → http://localhost:9222\n` +
       `（或直接到 linux.do 通過 challenge）\n` +
       `通過後腳本會自動繼續。`;
-    // 用 sendPhoto（直接傳 buffer）
-    await bot.sendPhoto(chatId, buf, { caption: caption.slice(0, 1024) });
-    console.log(`📸 CF 截圖已送出 (${masked})`);
+    // 用 sendPhoto（傳 file path） + contentType
+    await bot.sendPhoto(chatId, filePath, {
+      caption: caption.slice(0, 1024),
+      contentType: "image/png",
+    });
+    console.log(`📸 CF 截圖已送出 (${masked}) → ${filePath}`);
+    // 清理 tmp file
+    try { fsMod.unlinkSync(filePath); } catch {}
   } catch (e) {
     console.warn(`sendCfScreenshotToTelegram 失敗: ${e.message}`);
   }
@@ -425,6 +455,18 @@ function delayClick(time) {
     fatalError = error;
   } finally {
     // 統一退出碼：fatal → 1，否則 → 0
+    // 同步等待 cookie queue 完成（避免最後一筆 cookie 沒寫入 .env）
+    try {
+      await _cookieWriteQueue;
+    } catch {}
+    // 清掉所有殘留 chrome.exe（之前會留下 40 個子進程）
+    try {
+      const { execSync } = await import("child_process");
+      execSync('taskkill /F /IM chrome.exe /T', { stdio: 'ignore' });
+      console.log("🧹 已清理殘留 chrome 進程");
+    } catch (e) {
+      // ignore
+    }
     if (fatalError) {
       console.error(`退出碼 1（${fatalError.message}）`);
       process.exit(1);
@@ -851,11 +893,41 @@ async function launchBrowserForUser(username, password, cookie = null) {
             avatarImg = avatarImg || true;
             console.log(`检测到手动登入成功: ${maskUsername(currentUser.username)}`);
             sendToTelegram(`✅ ${maskUsername(username)} 手动登入成功`);
+            // 手動登入成功 → 立即寫 cookie（避免 superwill 那種「成功但 env 沒更新」）
+            try {
+              const saveClient = await page.createCDPSession().catch(() => null);
+              if (saveClient) {
+                const { cookies: loginCookies } = await saveClient.send('Network.getAllCookies');
+                const tAfterLogin = loginCookies.find(c => c.name === '_t' && c.domain.includes(domain));
+                if (tAfterLogin) {
+                  updateCookieInEnv(username, [`_t=${tAfterLogin.value}`]);
+                  console.log(`✅ 手動登入後立即保存 cookie: ${maskUsername(username)} (_t)`);
+                } else {
+                  console.log(`⚠️ 手動登入成功但未找到 _t cookie`);
+                }
+              }
+            } catch (saveErr) {
+              console.warn(`手動登入後保存 cookie 失敗: ${saveErr.message}`);
+            }
             break;
           }
           if (avatarImg && !authButtons) {
             console.log("检测到手动登入成功！");
             sendToTelegram(`✅ ${maskUsername(username)} 手动登入成功`);
+            // 同樣：手動登入成功時存 cookie
+            try {
+              const saveClient = await page.createCDPSession().catch(() => null);
+              if (saveClient) {
+                const { cookies: loginCookies } = await saveClient.send('Network.getAllCookies');
+                const tAfterLogin = loginCookies.find(c => c.name === '_t' && c.domain.includes(domain));
+                if (tAfterLogin) {
+                  updateCookieInEnv(username, [`_t=${tAfterLogin.value}`]);
+                  console.log(`✅ 手動登入後立即保存 cookie: ${maskUsername(username)} (_t)`);
+                }
+              }
+            } catch (saveErr) {
+              console.warn(`手動登入後保存 cookie 失敗: ${saveErr.message}`);
+            }
             break;
           }
         } catch (waitErr) {
