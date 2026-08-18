@@ -19,6 +19,71 @@ import {
 
 dotenv.config();
 
+// ===== 日誌系統：所有 stdout/stderr 同時寫到 console + log file =====
+const LOG_DIR = path.join(dirname(fileURLToPath(import.meta.url)), "logs");
+if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
+const LOG_KEEP_DAYS = parseInt(process.env.LOG_KEEP_DAYS || "5", 10); // 預設保留 5 天
+
+// 每次啟動一個 log file（timestamped）
+const LOG_FILE = path.join(LOG_DIR, `run-${new Date().toISOString().replace(/[:.]/g, "-")}.log`);
+const logStream = fs.createWriteStream(LOG_FILE, { flags: "a" });
+
+// 包裝 console.log / console.error / console.warn → 同步寫到 log file
+function writeLog(level, args) {
+  const ts = new Date().toISOString();
+  const line = `[${ts}] [${level}] ` + args.map(a => {
+    if (typeof a === "string") return a;
+    try { return JSON.stringify(a); } catch { return String(a); }
+  }).join(" ") + "\n";
+  logStream.write(line);
+}
+const _origLog = console.log;
+const _origErr = console.error;
+const _origWarn = console.warn;
+console.log = (...args) => { _origLog(...args); writeLog("INFO", args); };
+console.error = (...args) => { _origErr(...args); writeLog("ERROR", args); };
+console.warn = (...args) => { _origWarn(...args); writeLog("WARN", args); };
+console.info = (...args) => { _origLog(...args); writeLog("INFO", args); };
+
+process.on("uncaughtException", (err) => {
+  console.error(`[uncaughtException] ${err && err.message ? err.message : err}`);
+  if (err && err.stack) console.error(err.stack);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error(`[unhandledRejection] ${reason && reason.message ? reason.message : reason}`);
+});
+
+// 啟動時 log 環境資訊
+console.log(`========== Auto-read 啟動 ==========`);
+console.log(`Log file: ${LOG_FILE}`);
+console.log(`Node: ${process.version} | Platform: ${process.platform} | PID: ${process.pid}`);
+console.log(`Env: HEADLESS_MODE=${process.env.HEADLESS_MODE || "(default)"} PASSWORD_RETRY=${process.env.PASSWORD_RETRY || "(default)"} LOG_KEEP_DAYS=${LOG_KEEP_DAYS}`);
+
+// ===== Log rotation：清理 LOG_KEEP_DAYS 天前的 logs =====
+function rotateOldLogs() {
+  try {
+    const files = fs.readdirSync(LOG_DIR);
+    const now = Date.now();
+    let removed = 0;
+    for (const f of files) {
+      if (!f.endsWith(".log")) continue;
+      const fullPath = path.join(LOG_DIR, f);
+      try {
+        const stat = fs.statSync(fullPath);
+        const ageDays = (now - stat.mtimeMs) / (1000 * 60 * 60 * 24);
+        if (ageDays > LOG_KEEP_DAYS) {
+          fs.unlinkSync(fullPath);
+          removed++;
+        }
+      } catch {}
+    }
+    if (removed > 0) console.log(`🧹 已清理 ${removed} 個超過 ${LOG_KEEP_DAYS} 天的 log`);
+  } catch (e) {
+    console.warn("rotateOldLogs failed:", e.message);
+  }
+}
+rotateOldLogs();
+
 // 捕获未处理的异常/Promise拒绝，避免因 Target closed 之类错误导致进程退出
 process.on("unhandledRejection", (reason) => {
   try {
