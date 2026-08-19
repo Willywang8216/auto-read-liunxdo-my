@@ -602,7 +602,10 @@ async function launchBrowserForUser(username, password, cookie = null) {
         chromePath: "C:\\Users\\willy\\AppData\\Local\\ms-playwright\\chromium-1223\\chrome-win64\\chrome.exe",
       },
       connectOption: {
-        protocolTimeout: 120000,
+        // Increase from 120s → 180s: chromium's internal Network.enable call sometimes
+        // takes >120s on cloud IPs / under heavy CF challenge, causing unhandledRejection
+        // that the outer try/catch can't catch (Promise not awaited).
+        protocolTimeout: parseInt(process.env.PROTOCOL_TIMEOUT_MS || "180000", 10),
       },
     };
 
