@@ -794,7 +794,9 @@ async function launchBrowserForUser(username, password, cookie = null) {
       const tObj = cookieObjects.find(c => c.name === '_t');
       if (tObj) savedCookieValue = tObj.value;
       // 导航到域名，先通过 CF challenge
-      await page.goto(loginUrl, { waitUntil: "domcontentloaded", timeout: parseInt(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT || "120000", 10) }).catch(() => {});
+      // Default 60s (not 120s) — when linux.do is slow we want to fail fast and
+      // fall through to password login retry, not wait 2min per attempt × 3 attempts.
+      await page.goto(loginUrl, { waitUntil: "domcontentloaded", timeout: parseInt(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT || "60000", 10) }).catch(() => {});
       await waitForCf(page, browser);
 
       // CF 通过后，用 CDP 设置 _t cookie，带重试（CF 可能清除 cookie）
@@ -1227,7 +1229,7 @@ async function launchBrowserForUser(username, password, cookie = null) {
     console.log("导航到 /latest 开始阅读...");
     await page.goto(loginUrl + "/latest", {
       waitUntil: "domcontentloaded",
-      timeout: parseInt(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT || "120000", 10),
+      timeout: parseInt(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT || "60000", 10),
     }).catch(() => {});
     await waitForCf(page, browser);
     await delayClick(10000); // 等 10 秒让 evaluateOnNewDocument 脚本获取话题
@@ -1339,7 +1341,7 @@ async function login(page, username, password, retryCount = 3) {
 async function navigatePage(url, page, browser) {
   try {
     page.setDefaultNavigationTimeout(
-      parseInt(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT || "120000", 10)
+      parseInt(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT || "60000", 10)
     );
   } catch {}
   await page.goto(url, { waitUntil: "domcontentloaded" }); //如果使用默认的load,linux下页面会一直加载导致无法继续执行
