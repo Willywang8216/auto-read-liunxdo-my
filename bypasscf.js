@@ -796,43 +796,50 @@ async function launchBrowserForUser(username, password, cookie = null) {
       // 导航到域名，先通过 CF challenge
       // Default 60s (not 120s) — when linux.do is slow we want to fail fast and
       // fall through to password login retry, not wait 2min per attempt × 3 attempts.
-      await page.goto(loginUrl, { waitUntil: "domcontentloaded", timeout: parseInt(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT || "60000", 10) }).catch(() => {});
-      await waitForCf(page, browser);
-
-      // CF 通过后，用 CDP 设置 _t cookie，带重试（CF 可能清除 cookie）
-      const client = await page.createCDPSession();
-      for (let attempt = 0; attempt < 3; attempt++) {
-        // 设置 _t cookie
-        await client.send('Network.setCookie', {
-          name: '_t',
-          value: savedCookieValue,
-          domain: '.' + domain,
-          path: '/',
-          secure: true,
-          httpOnly: true,
-        });
-        console.log(`已设置 _t cookie (CDP, attempt ${attempt + 1})`);
-
-        // 验证 cookie 设置成功
-        const { cookies: verifyCookies } = await client.send('Network.getAllCookies');
-        const tCookieVerify = verifyCookies.find(c => c.name === '_t' && c.domain.includes(domain));
-        console.log(`CDP cookie 验证: _t=${tCookieVerify ? '存在' : '缺失！'}`);
-
-        // 带 cookie 刷新页面让 Discourse 读取 session
-        await page.reload({ waitUntil: "domcontentloaded" });
+      try {
+        await page.goto(loginUrl, { waitUntil: "domcontentloaded", timeout: parseInt(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT || "60000", 10) });
         await waitForCf(page, browser);
 
-        // CF 后检查 _t 是否还在
-        const { cookies: postCfCookies } = await client.send('Network.getAllCookies');
-        const tAfterCf = postCfCookies.find(c => c.name === '_t' && c.domain.includes(domain));
-        if (tAfterCf) {
-          console.log(`_t cookie 在 CF 后仍然存在 (attempt ${attempt + 1})`);
-          break;
+        // CF 通过后，用 CDP 设置 _t cookie，带重试（CF 可能清除 cookie）
+        const client = await page.createCDPSession();
+        for (let attempt = 0; attempt < 3; attempt++) {
+          // 设置 _t cookie
+          await client.send('Network.setCookie', {
+            name: '_t',
+            value: savedCookieValue,
+            domain: '.' + domain,
+            path: '/',
+            secure: true,
+            httpOnly: true,
+          });
+          console.log(`已设置 _t cookie (CDP, attempt ${attempt + 1})`);
+
+          // 验证 cookie 设置成功
+          const { cookies: verifyCookies } = await client.send('Network.getAllCookies');
+          const tCookieVerify = verifyCookies.find(c => c.name === '_t' && c.domain.includes(domain));
+          console.log(`CDP cookie 验证: _t=${tCookieVerify ? '存在' : '缺失！'}`);
+
+          // 带 cookie 刷新页面让 Discourse 读取 session
+          await page.reload({ waitUntil: "domcontentloaded" });
+          await waitForCf(page, browser);
+
+          // CF 后检查 _t 是否还在
+          const { cookies: postCfCookies } = await client.send('Network.getAllCookies');
+          const tAfterCf = postCfCookies.find(c => c.name === '_t' && c.domain.includes(domain));
+          if (tAfterCf) {
+            console.log(`_t cookie 在 CF 后仍然存在 (attempt ${attempt + 1})`);
+            break;
+          }
+          console.log(`CF challenge 清除了 _t cookie，重试 ${attempt + 1}/3...`);
+          await delayClick(2000);
         }
-        console.log(`CF challenge 清除了 _t cookie，重试 ${attempt + 1}/3...`);
         await delayClick(2000);
+      } catch (navErr) {
+        // cookie 導航階段 timeout → 不要 throw，直接讓後面的密碼 fallback 接手
+        console.warn(`⚠️ cookie 登入導航失敗：${navErr.message ? navErr.message.substring(0, 80) : navErr}`);
+        cookieExpiredReason = `cookie 導航失敗：${navErr.message ? navErr.message.substring(0, 80) : 'timeout'}`;
+        // 不要 return — 讓下面 cookieLoginFailed + password fallback 邏輯跑
       }
-      await delayClick(2000);
     } else if (cookie) {
       // cookie 存在但沒有 _t → 視為失敗，不要走 login() 浪費時間（沒有密碼）
       cookieExpiredReason = "cookie 缺少 _t，視為無效";
@@ -894,7 +901,11 @@ async function launchBrowserForUser(username, password, cookie = null) {
         console.log("已清除过期 _t cookie");
       } catch {}
       // 导航到干净的页面（没有过期 cookie，不会弹窗）
-      await page.goto(loginUrl, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+      try {
+        await page.goto(loginUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+      } catch (navErr) {
+        console.warn(`⚠️ 密碼登入前導航失敗：${navErr.message ? navErr.message.substring(0, 80) : navErr}`);
+      }
       await waitForCf(page, browser);
       await delayClick(2000);
       // 密码登入重试 3 次（每次等待 CF + 表单提交 + 验证 session）
@@ -919,7 +930,11 @@ async function launchBrowserForUser(username, password, cookie = null) {
               await c.send('Network.deleteCookies', { name: '_t', domain: '.' + domain });
               await c.send('Network.deleteCookies', { name: '_t', domain: domain });
             } catch {}
-            await page.goto(loginUrl, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+            try {
+              await page.goto(loginUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+            } catch (navErr) {
+              console.warn(`⚠️ 密碼 retry 導航失敗：${navErr.message ? navErr.message.substring(0, 80) : navErr}`);
+            }
             await waitForCf(page, browser);
             await delayClick(3000);
           }
@@ -944,7 +959,11 @@ async function launchBrowserForUser(username, password, cookie = null) {
         await clearClient.send('Network.deleteCookies', { name: '_t', domain: '.' + domain });
         await clearClient.send('Network.deleteCookies', { name: '_t', domain: domain });
       } catch {}
-      await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+      try {
+        await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      } catch (navErr) {
+        console.warn(`⚠️ 手動登入導航失敗：${navErr.message ? navErr.message.substring(0, 80) : navErr}`);
+      }
       await waitForCf(page, browser);
       await delayClick(2000);
       // 等待用户手动登入（10 分钟）—— 但有最壞情況：context 被 CF 銷毀，這時要 catch 不要讓整個 launchBrowserForUser 崩潰
@@ -1303,7 +1322,11 @@ async function login(page, username, password, retryCount = 3) {
         navigator.credentials.create = blockedFn;
       }
     }).catch(() => {});
-    await page.goto(loginUrl + "/login", { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+    try {
+      await page.goto(loginUrl + "/login", { waitUntil: "domcontentloaded", timeout: 30000 });
+    } catch (navErr) {
+      console.warn(`⚠️ login() 導航到 /login 失敗：${navErr.message ? navErr.message.substring(0, 80) : navErr}`);
+    }
     await waitForCf(page, null);
     await delayClick(2000);
   }
