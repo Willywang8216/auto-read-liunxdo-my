@@ -13,16 +13,30 @@ Output:
 """
 
 import json
+import os
 import sys
 import time
 from curl_cffi import requests
 
-# Account credentials
-ACCOUNTS = [
-    {"username": "goodhaohao", "password": "ROTATED_SEE_ENV"},
-    {"username": "supercool", "password": "ROTATED_SEE_ENV"},
-    {"username": "superwill", "password": "ROTATED_SEE_ENV"},
-]
+
+# Account credentials — 從環境變數讀取，切勿把密碼寫死在原始碼裡
+# USERNAMES / PASSWORDS 皆為逗號分隔且一一對應
+def load_accounts():
+    usernames = [u.strip() for u in os.environ.get("USERNAMES", "").split(",") if u.strip()]
+    passwords = [p.strip() for p in os.environ.get("PASSWORDS", "").split(",") if p.strip()]
+    if not usernames or not passwords:
+        print("❌ 請設定 USERNAMES 與 PASSWORDS 環境變數（逗號分隔，一一對應）", file=sys.stderr)
+        sys.exit(1)
+    if len(usernames) != len(passwords):
+        print(
+            f"❌ USERNAMES({len(usernames)}) 與 PASSWORDS({len(passwords)}) 數量不符",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return [{"username": u, "password": p} for u, p in zip(usernames, passwords)]
+
+
+ACCOUNTS = load_accounts()
 
 BASE_URL = "https://linux.do"
 

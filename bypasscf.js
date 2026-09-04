@@ -198,6 +198,10 @@ const chatId = process.env.TELEGRAM_CHAT_ID;
 const groupId = process.env.TELEGRAM_GROUP_ID;
 const specificUser = process.env.SPECIFIC_USER || "14790897";
 const maxConcurrentAccounts = parseInt(process.env.MAX_CONCURRENT_ACCOUNTS) || 3; // 每批最多同时运行的账号数
+if (!process.env.USERNAMES || !process.env.USERNAMES.trim()) {
+  console.error("❌ 缺少 USERNAMES 環境變數（請在 .env 或 GitHub Secrets 設定，逗號分隔）");
+  process.exit(1);
+}
 const usernames = process.env.USERNAMES.split(",");
 const passwords = process.env.PASSWORDS ? process.env.PASSWORDS.split(",") : [];
 // 读取每个账号对应的Cookie（逗号分隔，与USERNAMES一一对应），有Cookie则跳过表单登录
@@ -348,9 +352,9 @@ async function sendCfScreenshotToTelegram(page, username) {
     const caption =
       `🛡️ Cloudflare challenge 等待中\n` +
       `帳號: ${masked}\n` +
-      `請打開你的瀏覽器 → http://localhost:9222\n` +
-      `（或直接到 linux.do 通過 challenge）\n` +
-      `通過後腳本會自動繼續。`;
+      `本機執行：請在自動彈出的 Chrome 視窗手動通過 challenge\n` +
+      `雲端 Actions：無法手動通過，請更新 COOKIES secret 後重跑\n` +
+      `通過後腳本會自動繼續（最多等 5 分鐘）。`;
     // 用 sendPhoto（傳 file path） + contentType
     await bot.sendPhoto(chatId, filePath, {
       caption: caption.slice(0, 1024),
@@ -585,6 +589,48 @@ function parseCookieString(cookieStr, domain) {
     .filter((c) => c.name && c.value);
 }
 
+// 動態解析 Chrome 執行檔路徑（跨平台 + 跨 Playwright 版本，避免寫死版本號失效）
+function resolveChromePath() {
+  // 1. 明確以 CHROME_PATH 指定
+  if (process.env.CHROME_PATH && fs.existsSync(process.env.CHROME_PATH)) {
+    return process.env.CHROME_PATH;
+  }
+  // 2. 掃描 Playwright 的 ms-playwright 快取，挑版本號最大的「正式」chromium（排除 headless_shell）
+  const bases = [];
+  if (process.env.PLAYWRIGHT_BROWSERS_PATH && process.env.PLAYWRIGHT_BROWSERS_PATH !== "0") {
+    bases.push(process.env.PLAYWRIGHT_BROWSERS_PATH);
+  }
+  if (process.platform === "win32" && process.env.LOCALAPPDATA) {
+    bases.push(path.join(process.env.LOCALAPPDATA, "ms-playwright"));
+  } else if (process.platform === "darwin" && process.env.HOME) {
+    bases.push(path.join(process.env.HOME, "Library", "Caches", "ms-playwright"));
+  } else if (process.env.HOME) {
+    bases.push(path.join(process.env.HOME, ".cache", "ms-playwright"));
+  }
+  const candidates = [];
+  for (const base of bases) {
+    if (!base || !fs.existsSync(base)) continue;
+    let entries = [];
+    try { entries = fs.readdirSync(base); } catch { continue; }
+    for (const e of entries) {
+      const m = /^chromium-(\d+)$/.exec(e);
+      if (!m) continue;
+      const exe =
+        process.platform === "win32"
+          ? path.join(base, e, "chrome-win64", "chrome.exe")
+          : process.platform === "darwin"
+            ? path.join(base, e, "chrome-mac", "Chromium.app", "Contents", "MacOS", "Chromium")
+            : path.join(base, e, "chrome-linux", "chrome");
+      if (fs.existsSync(exe)) candidates.push({ ver: parseInt(m[1], 10), exe });
+    }
+  }
+  if (candidates.length) {
+    candidates.sort((a, b) => b.ver - a.ver);
+    return candidates[0].exe;
+  }
+  return null; // 找不到 → 交給 puppeteer-real-browser 自動偵測
+}
+
 async function launchBrowserForUser(username, password, cookie = null) {
   let browser = null; // 在 try 之外声明 browser 变量
   try {
@@ -598,9 +644,7 @@ async function launchBrowserForUser(username, password, cookie = null) {
     const browserOptions = {
       headless: headlessMode,
       args: ["--no-sandbox", "--disable-setuid-sandbox", "--password-store=basic", "--disable-features=PasswordLeakDetection,AutofillServerCommunication,PasswordManager,WebAuthentication", "--disable-save-password-bubble", "--disable-autofill-keyboard-accessory-view", "--start-maximized", "--window-size=1280,800"],
-      customConfig: {
-        chromePath: "C:\\Users\\willy\\AppData\\Local\\ms-playwright\\chromium-1223\\chrome-win64\\chrome.exe",
-      },
+      customConfig: {},
       connectOption: {
         // Increase from 120s → 180s: chromium's internal Network.enable call sometimes
         // takes >120s on cloud IPs / under heavy CF challenge, causing unhandledRejection
@@ -608,6 +652,16 @@ async function launchBrowserForUser(username, password, cookie = null) {
         protocolTimeout: parseInt(process.env.PROTOCOL_TIMEOUT_MS || "180000", 10),
       },
     };
+
+    // 動態解析 Chrome 執行檔路徑：優先 CHROME_PATH env，其次掃描 Playwright 快取挑最新版
+    // （原本寫死 chromium-1223，Playwright 升級到 1243 後路徑失效導致瀏覽器開不起來）
+    const resolvedChrome = resolveChromePath();
+    if (resolvedChrome) {
+      browserOptions.customConfig.chromePath = resolvedChrome;
+      console.log(`使用 Chrome: ${resolvedChrome}`);
+    } else {
+      console.log("未找到 Playwright chromium，交由 puppeteer-real-browser 自動偵測");
+    }
 
     // 添加代理配置到浏览器选项
     const proxyConfig = getProxyConfig();
@@ -1075,7 +1129,7 @@ async function launchBrowserForUser(username, password, cookie = null) {
     await delayClick(2000);
 
     let externalScriptPath;
-    if (isLikeSpecificUser === "true") {
+    if (isLikeSpecificUser) {
       const randomChoice = Math.random() < 0.5; // 生成一个随机数，50% 概率为 true
       if (randomChoice) {
         externalScriptPath = path.join(
