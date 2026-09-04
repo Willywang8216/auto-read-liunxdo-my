@@ -169,6 +169,8 @@ const shutdownTimer = setTimeout(async () => {
   } catch (e) {
     console.warn("退出前保存 cookie 失败:", e && e.message ? e.message : e);
   }
+  // 同步最新 .env（含輪換後 cookie）到雲端（若有設定 CREDENTIAL_BACKUP_REMOTE）
+  await backupEnvToCloud();
   // 關閉所有開過的 browser（含 chromium 子進程）
   try {
     const { execSync } = await import("child_process");
@@ -528,6 +530,8 @@ function delayClick(time) {
     try {
       await _cookieWriteQueue;
     } catch {}
+    // 把最新 .env（含輪換後 cookie）同步到雲端（若有設定 CREDENTIAL_BACKUP_REMOTE）
+    await backupEnvToCloud();
     // 清掉所有殘留 chrome.exe（之前會留下 40 個子進程）
     try {
       const { execSync } = await import("child_process");
@@ -570,6 +574,37 @@ function _doCookieUpdate(username, cookieList) {
     console.log(`.env cookie updated for ${username} (${cookieList.length} cookies)`);
   } catch (e) {
     console.warn("updateCookieInEnv failed:", e.message);
+  }
+}
+
+// 將 .env（憑證：cookie/密碼/token）同步到雲端 rclone remote。
+// 僅在設定 CREDENTIAL_BACKUP_REMOTE 時執行；未設定則跳過（GitHub Actions / 其他使用者不受影響）。
+async function backupEnvToCloud() {
+  const remote = (process.env.CREDENTIAL_BACKUP_REMOTE || "").trim();
+  if (!remote) return;
+  const envPath = path.join(dirname(fileURLToPath(import.meta.url)), ".env");
+  if (!fs.existsSync(envPath)) return;
+  try {
+    const { execFile } = await import("child_process");
+    const rcloneBin = process.env.RCLONE_PATH || "rclone";
+    await new Promise((resolve) => {
+      execFile(
+        rcloneBin,
+        ["copy", envPath, remote],
+        { timeout: 30000, windowsHide: true },
+        (err, stdout, stderr) => {
+          if (err) {
+            const msg = (stderr || (err && err.message) || "").toString().trim().slice(0, 160);
+            console.warn(`⚠️ 憑證雲端備份失敗（略過）：${msg}`);
+          } else {
+            console.log(`☁️ 憑證已同步到雲端：${remote}`);
+          }
+          resolve();
+        }
+      );
+    });
+  } catch (e) {
+    console.warn("backupEnvToCloud failed:", e && e.message ? e.message : e);
   }
 }
 // 将浏览器Cookie字符串（如 "name=value; name2=value2"）解析为 puppeteer setCookie 所需的对象数组
