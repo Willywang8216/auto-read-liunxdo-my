@@ -171,6 +171,8 @@ const shutdownTimer = setTimeout(async () => {
   }
   // 同步最新 .env（含輪換後 cookie）到雲端（若有設定 CREDENTIAL_BACKUP_REMOTE）
   await backupEnvToCloud();
+  // 把最新 cookie 推到 GitHub Secrets（若有設定 GH_SYNC_REPO），讓雲端 Actions 共用
+  await syncCookiesToGitHub();
   // 關閉所有開過的 browser（含 chromium 子進程）
   try {
     const { execSync } = await import("child_process");
@@ -532,6 +534,8 @@ function delayClick(time) {
     } catch {}
     // 把最新 .env（含輪換後 cookie）同步到雲端（若有設定 CREDENTIAL_BACKUP_REMOTE）
     await backupEnvToCloud();
+    // 把最新 cookie 推到 GitHub Secrets（若有設定 GH_SYNC_REPO），讓雲端 Actions 共用
+    await syncCookiesToGitHub();
     // 清掉所有殘留 chrome.exe（之前會留下 40 個子進程）
     try {
       const { execSync } = await import("child_process");
@@ -605,6 +609,46 @@ async function backupEnvToCloud() {
     });
   } catch (e) {
     console.warn("backupEnvToCloud failed:", e && e.message ? e.message : e);
+  }
+}
+
+// 把本機 .env 最新的 COOKIES 推到 GitHub Secrets，讓雲端 Actions 也用新 cookie。
+// 僅在設定 GH_SYNC_REPO（例：owner/repo）時執行；未設定則跳過。
+// 需要本機已安裝並登入 gh CLI（gh auth login）。用 stdin 傳值避免 cookie 出現在命令列。
+async function syncCookiesToGitHub() {
+  const repo = (process.env.GH_SYNC_REPO || "").trim();
+  if (!repo) return;
+  const envPath = path.join(dirname(fileURLToPath(import.meta.url)), ".env");
+  if (!fs.existsSync(envPath)) return;
+  try {
+    const envContent = fs.readFileSync(envPath, "utf8");
+    const m = envContent.match(/^COOKIES=(.*)$/m);
+    if (!m) return;
+    const cookiesVal = m[1].replace(/^["']|["']$/g, "");
+    if (!cookiesVal.trim()) return;
+    const { execFile } = await import("child_process");
+    const ghBin = process.env.GH_PATH || "gh";
+    await new Promise((resolve) => {
+      const child = execFile(
+        ghBin,
+        ["secret", "set", "COOKIES", "--repo", repo],
+        { timeout: 30000, windowsHide: true },
+        (err, stdout, stderr) => {
+          if (err) {
+            const msg = (stderr || (err && err.message) || "").toString().trim().slice(0, 160);
+            console.warn(`⚠️ GitHub Secrets 同步失敗（略過）：${msg}`);
+          } else {
+            console.log(`🔑 COOKIES 已同步到 GitHub Secrets：${repo}`);
+          }
+          resolve();
+        }
+      );
+      // 用 stdin 傳 cookie 值，不讓它出現在進程命令列/日誌
+      child.stdin.write(cookiesVal);
+      child.stdin.end();
+    });
+  } catch (e) {
+    console.warn("syncCookiesToGitHub failed:", e && e.message ? e.message : e);
   }
 }
 // 将浏览器Cookie字符串（如 "name=value; name2=value2"）解析为 puppeteer setCookie 所需的对象数组
