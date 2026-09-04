@@ -1359,59 +1359,77 @@ async function login(page, username, password, retryCount = 3) {
   await delayClick(2000);
 
   // 先导航到 /login 页面（确保 hidden-login-form 存在）
+  // 確保停在 linux.do 頁面（同源才能呼叫 /session API）。
+  // 不再進 /login：/login 頁會自動觸發 passkey 自動填入 → Chrome / Windows Hello 提示，
+  // 且我們改用 API 登入不需要表單，所以直接從目前頁面呼叫即可。
   const currentUrl = page.url();
-  if (!currentUrl.includes('/login')) {
-    console.log("导航到 /login 页面...");
-    // 禁用 passkey 防止 Windows Hello 弹窗
-    await page.evaluate(() => {
-      if (window.PublicKeyCredential) {
-        window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable = () => Promise.resolve(false);
-        window.PublicKeyCredential.isConditionalMediationAvailable = () => Promise.resolve(false);
-      }
-      if (navigator.credentials) {
-        const blockedFn = function() {
-          return Promise.reject(new DOMException('WebAuthn blocked', 'NotAllowedError'));
-        };
-        navigator.credentials.get = blockedFn;
-        navigator.credentials.create = blockedFn;
-      }
-    }).catch(() => {});
+  let sameOrigin = false;
+  try { sameOrigin = currentUrl.includes(new URL(loginUrl).host); } catch {}
+  if (!sameOrigin) {
+    console.log("導航到 linux.do 首頁（準備 API 登入）...");
     try {
-      await page.goto(loginUrl + "/login", { waitUntil: "domcontentloaded", timeout: 30000 });
+      await page.goto(loginUrl + "/", { waitUntil: "domcontentloaded", timeout: 30000 });
     } catch (navErr) {
-      console.warn(`⚠️ login() 導航到 /login 失敗：${navErr.message ? navErr.message.substring(0, 80) : navErr}`);
+      console.warn(`⚠️ login() 導航失敗：${navErr.message ? navErr.message.substring(0, 80) : navErr}`);
     }
     await waitForCf(page, null);
     await delayClick(2000);
   }
 
-  // 使用隐藏的 #hidden-login-form（标准 HTML 表单，不依赖 Ember）
-  console.log("使用 hidden-login-form 登入...");
-  // 再次禁用 WebAuthn（防止页面 JS 在表单提交前触发 passkey）
-  await page.evaluate(() => {
-    if (navigator.credentials) {
-      const blockedFn = function() {
-        return Promise.reject(new DOMException('WebAuthn blocked', 'NotAllowedError'));
+  // 直接呼叫 Discourse 登入 API：POST /session（附 CSRF token）。
+  // 不用 form.submit()：表單提交會觸發 Chrome「儲存密碼」/ Windows Hello 提示，
+  // 且 form.submit() 繞過 Ember 的 CSRF 處理 → POST /login 缺 X-CSRF-Token 被拒 → session 建不起來。
+  console.log("使用 Discourse /session API 登入...");
+  const loginResult = await page.evaluate(async (user, pass) => {
+    try {
+      let csrf = (document.querySelector('meta[name="csrf-token"]') || {}).content || '';
+      if (!csrf) {
+        const csrfRes = await fetch('/session/csrf.json', {
+          credentials: 'include',
+          headers: { 'X-Requested-With': 'XMLHttpRequest', Accept: 'application/json' },
+        });
+        if (csrfRes.ok) { try { csrf = (await csrfRes.json()).csrf || ''; } catch {} }
+      }
+      if (!csrf) return { ok: false, stage: 'csrf-missing' };
+      const body = new URLSearchParams();
+      body.set('login', user);
+      body.set('password', pass);
+      const res = await fetch('/session', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+          'X-CSRF-Token': csrf,
+          'X-Requested-With': 'XMLHttpRequest',
+          Accept: 'application/json',
+        },
+        body: body.toString(),
+      });
+      const text = await res.text();
+      let json = null;
+      try { json = JSON.parse(text); } catch {}
+      const okUser = !!(json && (json.user || json.username));
+      return {
+        ok: okUser,
+        status: res.status,
+        csrfLen: csrf.length,
+        user: (json && (json.user ? json.user.username : json.username)) || null,
+        error: json
+          ? (json.error || (json.errors && json.errors.join('; ')) || (okUser ? null : String(text).slice(0, 150)))
+          : String(text).slice(0, 150),
       };
-      navigator.credentials.get = blockedFn;
-      navigator.credentials.create = blockedFn;
+    } catch (e) {
+      return { ok: false, stage: 'exception', error: String((e && e.message) || e) };
     }
-  }).catch(() => {});
-  const loginResult = await page.evaluate((user, pass) => {
-    const form = document.querySelector('#hidden-login-form');
-    if (!form) return { error: 'hidden-login-form not found' };
-    const usernameInput = form.querySelector('#signin_username');
-    const passwordInput = form.querySelector('#signin_password');
-    if (usernameInput) usernameInput.value = user;
-    if (passwordInput) passwordInput.value = pass;
-    form.submit();
-    return { submitted: true, action: form.action };
   }, username, password);
-  console.log("登入结果:", JSON.stringify(loginResult));
+  console.log("登入结果:", JSON.stringify(loginResult).slice(0, 300));
 
-  try {
-    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 });
-  } catch {}
+  // 成功則重新載入首頁，讓 Ember app 帶著新 session 初始化
+  if (loginResult && loginResult.ok) {
+    try {
+      await page.goto(loginUrl + "/", { waitUntil: "domcontentloaded", timeout: 30000 });
+    } catch {}
+  }
   await delayClick(2000);
 }
 
