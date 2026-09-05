@@ -1,9 +1,12 @@
 name: Daily Auto Read (3 accounts)
 
 on:
-  schedule:
-    # 每天 UTC 10:00 运行 (北京时间 18:00)
-    - cron: "0 10 * * *"
+  # 雲端機房 IP（Azure 20.x）過不了 Cloudflare：頁面標題空白＝被 CF 攔在門外，
+  # cookie 再新也沒用（請求在 Discourse 看到 cookie 前就被擋）。
+  # 已改用本機 Windows 工作排程「LinuxDo Auto Read」每日執行（住宅 IP 才過得了 CF）。
+  # 排程已停用，避免每天產生假綠燈與假「登入失敗」通知。保留手動觸發供測試。
+  # schedule:
+  #   - cron: "0 10 * * *"
   workflow_dispatch: # 允许手动触发
 
 jobs:
