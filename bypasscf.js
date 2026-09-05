@@ -778,11 +778,15 @@ async function launchBrowserForUser(username, password, cookie = null) {
       );
     }
     browser = newBrowser; // 将 browser 初始化
-    // 拦截并封锁 passkey/WebAuthn 请求，防止 Windows Hello 弹窗
+    // 拦截并封锁 passkey/WebAuthn 请求，防止 Windows Hello 弹窗。
+    // interceptionActive 旗標：手動登入等待期間會關掉攔截，避免干擾使用者手動過 CF/hCaptcha 後點登入。
+    // 只擋 /session/passkey 與 webauthn；先前還擋了 /challenge.json，會誤殺正常登入流程 → 造成「點登入沒反應」。
+    let interceptionActive = true;
     await page.setRequestInterception(true);
     page.on('request', (request) => {
+      if (!interceptionActive) return; // 攔截已停用 → 交給瀏覽器原生處理，別呼叫 continue/abort（會丟錯）
       const url = request.url();
-      if (url.includes('/session/passkey') || url.includes('webauthn') || url.includes('/challenge.json')) {
+      if (url.includes('/session/passkey') || url.includes('webauthn')) {
         console.log(`[BLOCKED] ${url.substring(0, 80)}`);
         request.abort();
       } else {
@@ -1079,6 +1083,10 @@ async function launchBrowserForUser(username, password, cookie = null) {
 
     // 如果登录还是失败，等待用户手动登入
     if (!currentUser && password) {
+      // 手動登入前先關閉 request interception：讓使用者手動過 CF/hCaptcha、點「登入」時
+      // 不會被我們的攔截器干擾（先前 bug：hCaptcha 綠勾過了，點登入卻沒反應）。
+      interceptionActive = false;
+      try { await page.setRequestInterception(false); } catch {}
       // 改成：sendToTelegram 一定要送（即使 manual TG 失敗也要 log）
       const manualMsg = `⚠️ ${maskUsername(username)} 自動登入失敗！請到瀏覽器手動登入，腳本會等待 10 分鐘。\n` +
         `可能原因：CF challenge、linux.do 改登入流程、密碼過期\n` +
@@ -1455,60 +1463,81 @@ async function login(page, username, password, retryCount = 3) {
     await delayClick(2000);
   }
 
-  // 直接呼叫 Discourse 登入 API：POST /session（附 CSRF token）。
-  // 不用 form.submit()：表單提交會觸發 Chrome「儲存密碼」/ Windows Hello 提示，
-  // 且 form.submit() 繞過 Ember 的 CSRF 處理 → POST /login 缺 X-CSRF-Token 被拒 → session 建不起來。
-  console.log("使用 Discourse /session API 登入...");
-  const loginResult = await page.evaluate(async (user, pass) => {
-    try {
-      let csrf = (document.querySelector('meta[name="csrf-token"]') || {}).content || '';
-      if (!csrf) {
-        const csrfRes = await fetch('/session/csrf.json', {
-          credentials: 'include',
-          headers: { 'X-Requested-With': 'XMLHttpRequest', Accept: 'application/json' },
-        });
-        if (csrfRes.ok) { try { csrf = (await csrfRes.json()).csrf || ''; } catch {} }
-      }
-      if (!csrf) return { ok: false, stage: 'csrf-missing' };
-      const body = new URLSearchParams();
-      body.set('login', user);
-      body.set('password', pass);
-      const res = await fetch('/session', {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-          'X-CSRF-Token': csrf,
-          'X-Requested-With': 'XMLHttpRequest',
-          Accept: 'application/json',
-        },
-        body: body.toString(),
-      });
-      const text = await res.text();
-      let json = null;
-      try { json = JSON.parse(text); } catch {}
-      const okUser = !!(json && (json.user || json.username));
-      return {
-        ok: okUser,
-        status: res.status,
-        csrfLen: csrf.length,
-        user: (json && (json.user ? json.user.username : json.username)) || null,
-        error: json
-          ? (json.error || (json.errors && json.errors.join('; ')) || (okUser ? null : String(text).slice(0, 150)))
-          : String(text).slice(0, 150),
-      };
-    } catch (e) {
-      return { ok: false, stage: 'exception', error: String((e && e.message) || e) };
-    }
-  }, username, password);
-  console.log("登入结果:", JSON.stringify(loginResult).slice(0, 300));
+  // 表單登入（改回上游做法）：點開登入框 → 填帳密 → 送出。
+  // 之前改用 fetch('/session') 手刻請求會被 linux.do 反爬直接回 403（"not permitted"），
+  // 故改回官方 Discourse 登入表單流程（由 Ember 帶正確 CSRF / headers，看起來才像真人瀏覽器）。
+  // passkey / Windows Hello 彈窗已由 setRequestInterception（擋 /session/passkey、webauthn）
+  // + navigator.credentials 覆寫壓制；且用「彈窗式登入框」不會導到 /login 觸發自動填入。
+  console.log("使用 Discourse 登入表單登入...");
 
-  // 成功則重新載入首頁，讓 Ember app 帶著新 session 初始化
-  if (loginResult && loginResult.ok) {
+  // 1) 觸發登入框（header 的登入鈕，開的是 modal，不會導到 /login 頁）
+  const openedLogin = await page.evaluate(() => {
+    const btns = Array.from(document.querySelectorAll('button, .login-button, .sign-in-button'));
+    const btn = btns.find(b =>
+      /登录|登入|log ?in|sign ?in/i.test((b.textContent || '') + ' ' + (b.className || '')));
+    if (btn) { btn.click(); return true; }
+    return false;
+  }).catch(() => false);
+
+  if (!openedLogin) {
+    // 後備：進一個主題頁，Discourse 會提示登入，再點一次登入鈕
     try {
-      await page.goto(loginUrl + "/", { waitUntil: "domcontentloaded", timeout: 30000 });
+      await page.goto(loginUrl + "/t/topic/1", { waitUntil: "domcontentloaded", timeout: 30000 });
+      await waitForCf(page, null);
+      await delayClick(1500);
+      await page.evaluate(() => {
+        const b = document.querySelector('.login-button') ||
+          Array.from(document.querySelectorAll('button')).find(x => /登录|登入|log ?in|sign ?in/i.test(x.textContent || ''));
+        if (b) b.click();
+      }).catch(() => {});
     } catch {}
   }
+
+  // 2) 等登入框出現
+  try {
+    await page.waitForSelector("#login-account-name", { timeout: 20000 });
+  } catch {
+    console.warn("⚠️ 未出現登入表單（#login-account-name），登入中止交由後續流程判斷");
+    await delayClick(1000);
+    return;
+  }
+  await delayClick(1000);
+
+  // 3) 填帳號
+  await page.click("#login-account-name", { clickCount: 3 }).catch(() => {});
+  await page.type("#login-account-name", username, { delay: 80 });
+  await delayClick(800);
+
+  // 4) 填密碼
+  await page.click("#login-account-password", { clickCount: 3 }).catch(() => {});
+  await page.type("#login-account-password", password, { delay: 80 });
+  await delayClick(800);
+
+  // 5) 送出：Discourse 登入是 SPA（多半不整頁跳轉），故用 race —— 誰先到就算：
+  //    (a) 真的整頁導航，或 (b) 登入框消失（= 已被接受）。最多等 8 秒，避免每次 retry 空等 30 秒。
+  try {
+    await page.waitForSelector("#login-button", { timeout: 10000 });
+    await delayClick(500);
+    await page.click("#login-button").catch(() => {});
+    await Promise.race([
+      page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 8000 }).catch(() => {}),
+      page.waitForFunction(() => !document.querySelector('#login-account-name'), { timeout: 8000 }).catch(() => {}),
+    ]);
+  } catch (error) {
+    console.warn(`⚠️ 送出登入時發生錯誤：${error.message ? error.message.slice(0, 100) : error}`);
+  }
+
+  // 檢查是否帳密錯誤（有錯誤提示就記一筆，方便判斷是密碼問題還是 CF 問題）
+  const alertText = await page.evaluate(() => {
+    const el = document.querySelector('.alert.alert-error, #modal-alert, .login-error');
+    return el ? (el.textContent || '').trim() : '';
+  }).catch(() => '');
+  if (alertText && /incorrect|不正确|不正確|错误|錯誤|失败|失敗/i.test(alertText)) {
+    console.warn(`⚠️ ${maskUsername(username)} 登入被拒（帳密可能錯誤）：${alertText.slice(0, 120)}`);
+  } else if (alertText) {
+    console.warn(`⚠️ 登入提示：${alertText.slice(0, 120)}`);
+  }
+
   await delayClick(2000);
 }
 
