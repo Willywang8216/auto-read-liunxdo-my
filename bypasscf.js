@@ -710,6 +710,82 @@ function resolveChromePath() {
   return null; // 找不到 → 交給 puppeteer-real-browser 自動偵測
 }
 
+// ─────────────────────────────────────────────────────────────
+// 瀏覽器啟動加固：connect() 失敗自動重試 1 次 + 清掉孤立 chrome
+// 背景：g***（每場第一個帳號）偶發在 connect() 就拋
+//   "Cannot read properties of undefined (reading 'on')"（library 內部競態），
+//   且 browser 變數尚未指派 → 外層 catch 關不到 → 留下卡在 about:blank 的孤立 Chrome，
+//   下一個 run 的 connect 又可能撞上被該 profile 卡住的情況，形成惡性循環。
+// 做法：connect 前快照 chrome PID；失敗時只砍「這次新增」的 chrome（不誤殺其他帳號 / 使用者 Chrome），
+//   等 4 秒重試一次；連續兩次失敗才 throw（交給 launchBrowserForUser 的 catch 統一處理）。
+async function snapshotChromePids() {
+  try {
+    const { execSync } = await import("child_process");
+    const out = execSync('tasklist /FI "IMAGENAME eq chrome.exe" /FO CSV /NH', {
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "ignore"],
+    });
+    const pids = new Set();
+    for (const line of out.split("\n")) {
+      const m = line.match(/"chrome\.exe","(\d+)"/);
+      if (m) pids.add(Number(m[1]));
+    }
+    return pids;
+  } catch {
+    return new Set();
+  }
+}
+
+async function killChromesNotIn(beforePids) {
+  try {
+    const { execSync } = await import("child_process");
+    const nowPids = await snapshotChromePids();
+    const newPids = [...nowPids].filter((pid) => !beforePids.has(pid));
+    if (newPids.length) {
+      for (const pid of newPids) {
+        try { execSync(`taskkill /F /PID ${pid} /T`, { stdio: "ignore" }); } catch {}
+      }
+      console.log(`🧹 已清理 connect 失敗殘留的 chrome：PID ${newPids.join(", ")}`);
+    }
+  } catch {}
+}
+
+async function launchBrowserWithRetry(browserOptions) {
+  const { connect } = await import("puppeteer-real-browser");
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const beforePids = await snapshotChromePids();
+    try {
+      const connectResult = await connect({
+        ...browserOptions,
+        prefs: {
+          "credentials_enable_service": false,
+          "profile.password_manager_enabled": false,
+        },
+      });
+      const page = connectResult && connectResult.page;
+      const newBrowser = connectResult && connectResult.browser;
+      if (!page || !newBrowser) {
+        // connect 成功但缺 page/browser → 同樣視為失敗（孤立瀏覽器要清）
+        if (newBrowser) { try { await newBrowser.close(); } catch {} }
+        throw new Error("puppeteer-real-browser connect() 沒有回傳 page/browser");
+      }
+      return { page, newBrowser };
+    } catch (err) {
+      lastErr = err;
+      console.warn(
+        `⚠️ 瀏覽器啟動第 ${attempt} 次失敗：${err && err.message ? err.message.slice(0, 140) : err}`
+      );
+      await killChromesNotIn(beforePids); // 清這次 connect 殘留的孤立 chrome
+      if (attempt === 1) {
+        await new Promise((r) => setTimeout(r, 4000)); // 休息 4 秒再重試一次
+        continue;
+      }
+    }
+  }
+  throw lastErr;
+}
+
 async function launchBrowserForUser(username, password, cookie = null) {
   let browser = null; // 在 try 之外声明 browser 变量
   try {
@@ -762,21 +838,8 @@ async function launchBrowserForUser(username, password, cookie = null) {
       }
     }
 
-    var { connect } = await import("puppeteer-real-browser");
-    const connectResult = await connect({
-      ...browserOptions,
-      prefs: {
-        "credentials_enable_service": false,
-        "profile.password_manager_enabled": false,
-      },
-    });
-    const page = connectResult && connectResult.page;
-    const newBrowser = connectResult && connectResult.browser;
-    if (!page || !newBrowser) {
-      throw new Error(
-        `puppeteer-real-browser connect() 沒有回傳 page/browser（連線失敗，可能是 Chrome 未啟動）`,
-      );
-    }
+    // 啟動瀏覽器（含失敗自動重試 1 次 + 失敗清掉孤立 chrome，見 launchBrowserWithRetry）
+    const { page, newBrowser } = await launchBrowserWithRetry(browserOptions);
     browser = newBrowser; // 将 browser 初始化
     // 拦截并封锁 passkey/WebAuthn 请求，防止 Windows Hello 弹窗。
     // interceptionActive 旗標：手動登入等待期間會關掉攔截，避免干擾使用者手動過 CF/hCaptcha 後點登入。
